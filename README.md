@@ -2,7 +2,7 @@
 
 [![NuGet Version](https://img.shields.io/nuget/v/Checkpoint.NET)](https://www.nuget.org/packages/Checkpoint.NET/)
 [![.NET](https://img.shields.io/badge/.NET-8.0-blue)](https://dotnet.microsoft.com/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Build Status](https://img.shields.io/github/actions/workflow/status/yourusername/Checkpoint.NET/ci.yml?branch=main)](https://github.com/yourusername/Checkpoint.NET/actions)
 
 **Universal checkpointing for C# machine learning.** Persist full training states (Weights + Optimizer + Hyperparameters) *and* inference session states (KV-cache + Token History) to File System, PostgreSQL, or Cloud Blobs. Manage thousands of models by GUID with zero framework lock-in—built for custom training loops first.
