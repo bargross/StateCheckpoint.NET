@@ -5,7 +5,20 @@
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Build Status](https://img.shields.io/github/actions/workflow/status/bargross/Checkpoint.NET/ci.yml?branch=main)](https://github.com/bargross/Checkpoint.NET/actions)
 
-**Checkpoint.NET** is the ultimate state persistence layer for C# machine learning. Solve GPU training stalls with non-blocking, fire-and-forget background saves while guaranteeing data integrity via automatic memory-safe deep copying. Persist full training checkpoints (Weights + Optimizer + Tokenizer + Hyperparameters) and inference sessions (KV-Cache + Token History) across FileSystem, PostgreSQL, or SQL Server. Zero framework lock-in, fully async, and managed entirely by GUIDs—built for custom training loops first.
+## Why Checkpoint.NET?
+
+Training large language models and running inference on them is expensive and time‑consuming. A crash or an I/O stall can waste hours of GPU time. Checkpoint.NET solves this by:
+
+- **Running saves in the background:** Your training loop isn't blocked by disk writes.
+- **Ensuring data integrity:** Deep copying prevents in‑memory mutations from corrupting your checkpoints.
+- **Being framework‑agnostic:** Use it with any C# ML library or your own custom math.
+- **Managing both training and inference:** Save model weights, optimizer states, AND inference session states (KV‑cache + token history).
+
+---
+
+## What is Checkpoint.NET?
+
+Checkpoint.NET is the ultimate state persistence layer for C# machine learning. Persist full training checkpoints (Weights + Optimizer + Tokenizer + Hyperparameters) and inference sessions (KV‑Cache + Token History) across FileSystem, PostgreSQL, or SQL Server. Zero framework lock‑in, fully async, and managed entirely by GUIDs—built for custom training loops first.
 
 ---
 
@@ -32,6 +45,35 @@ Both halves share the same storage backends (FileSystem, PostgreSQL) and the sam
 - ✅ **Permission Handling** – Configurable startup validation and automatic fallback paths for file-system stores.
 - ✅ **Async/Await** – Fully asynchronous and cancellation-token aware.
 - ✅ **Framework Agnostic** – Works with your custom math, TorchSharp, ML.NET, or any C# ML library.
+
+---
+
+## Core Concepts
+
+Checkpoint.NET is built around two distinct domains, each with its own manager and storage model:
+
+### 1. Training Checkpoints (`CheckpointManager`)
+
+Used for saving the state of a model during training. This includes:
+
+- **Weights** – The model parameters (byte array).
+- **Optimizer** – Momentum, variance, and other optimizer states (byte array).
+- **Tokenizer** – Complete vocab maps, merge rules, and special token IDs.
+- **Hyperparameters** – Hidden size, layers, learning rate, etc.
+- **Metadata** – Epoch, loss, creation date, and user‑defined tags.
+
+**Use case:** Resume training after a crash, or distribute a fine‑tuned model.
+
+### 2. Inference Sessions (`SessionManager`)
+
+Used for saving the state of an active chat or inference session. This includes:
+
+- **KV‑Cache** – The attention key/value tensors from the inference engine (byte array).
+- **Token History** – The list of token IDs already processed.
+- **Sampling Configuration** – Temperature, top‑p, top‑k, etc.
+- **Model Fingerprint** – A unique identifier for the model (e.g., SHA256 hash).
+
+**Use case:** Pause and resume a conversation without reprocessing the entire prompt history.
 
 ---
 
@@ -269,58 +311,88 @@ await sessionManager.DeleteAsync(chatId);
 **⚠️ Important:** When using background saves (`Enabled = true`), always wrap your manager in an `await using` block or explicitly call `DisposeAsync()` to ensure pending saves complete before your application exits.
 **Important Note:** The KV-cache size is typically between 100 MB and 2 GB, making it far lighter than full model weights. The SessionManager uses the same storage backends as the CheckpointManager—so you can store sessions alongside your models or in a separate location.
 
+## Resuming a Checkpoint
+
+When you save a checkpoint, `CheckpointManager.SaveAsync()` returns a `Guid` that uniquely identifies that checkpoint. To resume training later, you **must persist this ID** (e.g., in a file, a database, or an environment variable). On application startup, read the ID and pass it to `LoadAsync` to restore your model's state.
+
+### Example Workflow
+
+```csharp
+using Checkpoint.NET.Manager;
+using Checkpoint.NET.Models;
+using Checkpoint.NET.Stores;
+
+// 1. Load the model ID from persistent storage (e.g., a file)
+Guid modelId = LoadModelIdFromFile("model-id.txt");
+
+// 2. Resume training from the last checkpoint
+var loaded = await manager.LoadAsync(modelId);
+if (loaded != null)
+{
+    // Restore weights, optimizer, epoch, etc.
+    // Continue training from epoch loaded.CurrentEpoch.
+}
+
+// 3. Save a checkpoint (reuse the same ID to overwrite)
+Guid newId = await manager.SaveAsync(
+    weights: currentWeights,
+    optimizer: currentOptimizer,
+    hyperParams: hyperParams,
+    tokenizer: tokenizer,
+    epoch: currentEpoch,
+    loss: currentLoss,
+    existingId: modelId  // <-- Reuse the same ID
+);
+
+// 4. Persist the ID again (in case it was newly generated)
+SaveModelIdToFile("model-id.txt", newId);
+```
+
+**Important:** If you pass `existingId` to `SaveAsync`, the existing checkpoint is **overwritten**. This is useful for keeping a single "latest checkpoint" file. If you want to keep a history of checkpoints, generate a new `Guid` each time (omit `existingId`).
+
+**⚠️ Important:** When using background saves (`Enabled = true`), always wrap your manager in an `await using` block or explicitly call `DisposeAsync()` before your application exits. This ensures that all pending saves complete and the background thread is properly cleaned up.
+
 ## Storage Providers
 
-Checkpoint.NET provides two built-in storage backends for both Training Checkpoints and Inference Sessions:
+Checkpoint.NET provides three built‑in storage backends:
 
-- **FileSystem** – Stores data on local or mounted drives (ideal for development, edge deployments, or single-server setups).
-- **PostgreSQL** – Stores metadata in relational tables and binaries either as Large Objects (Models) or BYTEA (Sessions).
+- **FileSystem** – Stores data on local or mounted drives (ideal for development, edge deployments, or single‑server setups).
+- **PostgreSQL** – Stores metadata in JSONB columns and binaries as Large Objects (for Models) or BYTEA (for Sessions).
+- **SQL Server** – Stores metadata in JSON strings and binaries as VARBINARY(MAX).
 
-Both backends support the same CRUD operations (Save, Load, List, Delete) and use the same GUID-based identification system.
+All backends support the same CRUD operations (Save, Load, List, Delete) and use the same GUID‑based identification system.
 
 ---
 
 ### FileSystem (`FileSystemModelStore`, `FileSystemSessionStore`)
 
-The FileSystem provider saves each checkpoint in its own dedicated folder. This is the simplest and most reliable storage option for local development and single-server production environments.
-
-**Usage:**
-
-Instantiate FileSystemModelStore with path "./checkpoints" and pass to CheckpointManager
-
-```csharp
-var modelStore = new FileSystemModelStore("./checkpoints");
-var checkpointManager = new CheckpointManager(modelStore);
-```
-
-Instantiate FileSystemSessionStore with path "./sessions" and pass to SessionManager
-
-```csharp
-var sessionStore = new FileSystemSessionStore("./sessions");
-var sessionManager = new SessionManager(sessionStore);
-```
+The FileSystem provider saves each checkpoint in its own dedicated folder. This is the simplest and most reliable storage option for local development and single‑server production environments.
 
 **Directory Structure:**
 
-```plaintext
-/data/
+```
+./data/
 ├── models/
 │   └── {ModelId}/
-│       ├── weights.bin      # Model weights (GBs)
-│       ├── optimizer.bin    # Optimizer state (GBs)
-│       └── manifest.json    # Metadata (HyperParams, Tokenizer, Epoch, Loss, Tags)
+│       ├── weights.bin          # Model weights (GBs)
+│       ├── optimizer.bin        # Optimizer state (GBs)
+│       └── manifest.json        # Metadata (HyperParams, Tokenizer, Epoch, Loss, Tags)
 └── sessions/
     └── {SessionId}/
-        ├── kv.bin           # KV-cache (MBs - 2GB)
-        └── meta.json        # Metadata (ModelFingerprint, TokenHistory, SamplingConfig, Tags)
+        ├── kv.bin               # KV‑cache (MBs – 2GB)
+        └── meta.json            # Metadata (ModelFingerprint, TokenHistory, SamplingConfig, Tags)
 ```
 
+**Usage:**
 
-### File System Configuration Options
+```csharp
+var modelStore = new FileSystemModelStore("./checkpoints");
+var sessionStore = new FileSystemSessionStore("./sessions");
+```
 
-You can customize the behavior of FileSystem stores using `FileSystemStoreOptions`.
+**Configuration Options:**
 
-Instantiate FileSystemStoreOptions with EnsureDirectoryExists, ValidatePermissionsOnStartup, and FallbackPath, then pass to FileSystemModelStore constructor
+You can customize the behavior of FileSystem stores using `FileSystemStoreOptions`:
 
 ```csharp
 var options = new FileSystemStoreOptions
@@ -329,92 +401,14 @@ var options = new FileSystemStoreOptions
     ValidatePermissionsOnStartup = true,
     FallbackPath = "/temp/backup_models"
 };
-
 var store = new FileSystemModelStore("./protected_models", options);
 ```
 
 | Property | Description |
 | :--- | :--- |
-| `EnsureDirectoryExists` | If `true`, the library creates the directory. If `false`, throws a `DirectoryNotFoundException` if the path is missing. |
-| `ValidatePermissionsOnStartup` | If `true`, the library tests write permissions in the constructor by creating and deleting a temporary file. If `false`, permissions are only checked when `SaveAsync` or `LoadAsync` is called. |
-| `FallbackPath` | An optional absolute or relative path to use if the primary directory is inaccessible due to permission errors. Useful for CI/CD environments or containerized deployments. |
-
-
-### Background Saves Configuration Options
-
-Enable non‑blocking saves to prevent disk I/O from stalling your training or inference loops. Background saves are configured using `BackgroundSaveOptions`.
-
-| Property | Description |
-| :--- | :--- |
-| `Enabled` | Turns background saves on or off. When enabled, saves become fire‑and‑forget and the manager returns immediately after enqueuing the save operation. |
-| `QueueCapacity` | Defines the maximum number of pending save operations. If the queue exceeds this capacity, the caller blocks until space frees up, providing backpressure to prevent memory exhaustion. |
-| `OnError` | Optional callback invoked when a background save fails. If not provided, exceptions are silently swallowed to prevent training crashes. |
-
-**Example – Training with Background Saves:**
-
-```csharp
-using Checkpoint.NET.Manager;
-using Checkpoint.NET.Models;
-using Checkpoint.NET.Stores;
-
-// Configure background saves
-var options = new BackgroundSaveOptions
-{
-    Enabled = true,
-    QueueCapacity = 5,
-    OnError = ex => Console.WriteLine($"Background save failed: {ex.Message}")
-};
-
-// Create the manager with background mode enabled
-await using var manager = new CheckpointManager(options);
-
-// During training, save checkpoints without blocking
-Guid modelId = await manager.SaveAsync(
-    weights: weightBytes,
-    optimizer: optimizerStateBytes,
-    hyperParams: hyperParams,
-    tokenizer: tokenizer,
-    epoch: currentEpoch,
-    loss: currentLoss
-);
-
-// The method returns immediately; the actual save runs in the background.
-// Continue training without waiting for disk I/O.
-```
-
-**Example – Inference Sessions with Background Saves:**
-
-```csharp
-using Checkpoint.NET.Manager;
-using Checkpoint.NET.Models;
-using Checkpoint.NET.Stores;
-
-var options = new BackgroundSaveOptions
-{
-    Enabled = true,
-    QueueCapacity = 3,
-    OnError = ex => Console.WriteLine($"Background session save failed: {ex.Message}")
-};
-
-await using var sessionManager = new SessionManager(options);
-
-// Save the session – returns immediately
-Guid chatId = await sessionManager.SaveAsync(
-    sessionId: currentChatId,
-    kvCacheBytes: kvCache,
-    tokenHistory: tokenHistory,
-    modelFingerprint: "llama-2-7b-v1"
-);
-
-// Continue the conversation without waiting for the save to finish.
-```
-
-**⚠️ Important:** When using background saves (`Enabled = true`), always wrap your manager in an `await using` block or explicitly call `DisposeAsync()` before your application exits. This ensures that all pending saves complete and the background thread is properly cleaned up.
-
-```csharp
-// At the end of your application:
-await manager.DisposeAsync(); // Flushes the background queue.
-```
+| `EnsureDirectoryExists` | If `true`, the library creates the directory. If `false`, throws if missing. |
+| `ValidatePermissionsOnStartup` | If `true`, tests write permissions in the constructor. |
+| `FallbackPath` | Optional path to use if the primary directory is inaccessible. |
 
 ---
 
@@ -422,68 +416,65 @@ await manager.DisposeAsync(); // Flushes the background queue.
 
 The PostgreSQL provider stores metadata in structured JSONB columns and binaries using two different strategies optimized for the data size:
 
-- **Training (Models):** Uses PostgreSQL **Large Objects** (`OID`) – supports individual files > 2 GB (weights and optimizer).
-- **Inference (Sessions):** Uses `BYTEA` columns – efficient for KV-caches typically < 1 GB and faster for frequent save/load operations.
+- **Training (Models):** Uses PostgreSQL **Large Objects** (`OID`) – supports individual files > 2 GB.
+- **Inference (Sessions):** Uses `BYTEA` columns – efficient for KV‑caches typically < 1 GB.
 
 **Usage:**
 
-Instantiate PostgresModelStore with connection string and pass to CheckpointManager
-
 ```csharp
-// Option A: connection String (Library manages the connection pool)
 var modelStore = new PostgresModelStore("Host=localhost;Database=checkpoints;Username=postgres;Password=pass");
-var checkpointManager = new CheckpointManager(modelStore);
-
-// Option B: Existing NpgsqlDataSource (Recommended for DI)
-// var modelStore = new PostgresModelStore(myDataSource);
-```
-
-Instantiate PostgresSessionStore with connection string and pass to SessionManager
-```csharp
-// Option A: connection String
 var sessionStore = new PostgresSessionStore("Host=localhost;Database=checkpoints;Username=postgres;Password=pass");
-var sessionManager = new SessionManager(sessionStore);
 
-// Option B: Existing NpgsqlDataSource
-// var sessionStore = new PostgresSessionStore(myDataSource);
-```
-
-Call EnsureSchemaAsync on both stores at application startup
-
-```csharp
+// Ensure tables exist (call once at application startup)
 await modelStore.EnsureSchemaAsync();
 await sessionStore.EnsureSchemaAsync();
 ```
-
 
 **Database Schema:**
 
 | Training (Models) | Inference (Sessions) |
 | :--- | :--- |
-| **`model_manifests`** <br> `model_id` (UUID, PK) <br> `hyper_params` (JSONB) <br> `tokenizer` (JSONB) <br> `epoch` (INT) <br> `loss` (FLOAT) <br> `created_at` (TIMESTAMPTZ) <br> `tags` (JSONB) | **`inference_sessions`** <br> `session_id` (UUID, PK) <br> `model_fingerprint` (TEXT) <br> `token_history` (INTEGER[]) <br> `sampling_config` (JSONB) <br> `kv_cache_bytes` (BYTEA) <br> `last_updated` (TIMESTAMPTZ) <br> `tags` (JSONB) |
-| **`model_blobs`** <br> `model_id` (UUID, PK, FK) <br> `weights_oid` (OID) <br> `optimizer_oid` (OID) | *(Single table – no Large Objects required)* |
-| **Storage Strategy:** Large Objects (LO) | **Storage Strategy:** BYTEA |
-| **Size Limit:** Up to 2 GB per LO (weights + optimizer) | **Practical Limit:** ~1 GB per BYTEA (KV-cache) |
+| `model_manifests` (JSONB metadata) | `inference_sessions` (BYTEA for KV‑cache) |
+| `model_blobs` (OID references) | (Single table – no Large Objects) |
+| Storage: Large Objects (LO) | Storage: BYTEA |
+| Limit: >2 GB per LO | Limit: ~1 GB per BYTEA |
 
-**Why Different Strategies?**
+---
 
-| Aspect | Models (Training) | Sessions (Inference) |
-| :--- | :--- | :--- |
-| **Binary Size** | 5 GB – 50 GB+ | 100 MB – 2 GB |
-| **PostgreSQL Feature** | Large Objects (`OID`) | `BYTEA` column |
-| **Performance** | Optimized for streaming large data in/out. | Optimized for small, frequent read/write operations. |
-| **Why Not BYTEA?** | BYTEA has a 1 GB hard limit per column in PostgreSQL. | BYTEA is simpler, faster for small data, and does not require managing OID references. |
+### SQL Server (`SqlServerModelStore`, `SqlServerSessionStore`)
+
+The SQL Server provider stores metadata as JSON strings in `NVARCHAR(MAX)` columns and binaries as `VARBINARY(MAX)`.
+
+- **Training (Models):** Uses `VARBINARY(MAX)` – supports up to 2 GB per file.
+- **Inference (Sessions):** Uses `VARBINARY(MAX)` – efficient for KV‑caches.
+
+**Usage:**
+
+```csharp
+var modelStore = new SqlServerModelStore("Server=localhost;Database=Checkpoints;Integrated Security=True;");
+var sessionStore = new SqlServerSessionStore("Server=localhost;Database=Checkpoints;Integrated Security=True;");
+
+await modelStore.EnsureSchemaAsync();
+await sessionStore.EnsureSchemaAsync();
+```
+
+**Database Schema:**
+
+| Training (Models) | Inference (Sessions) |
+| :--- | :--- |
+| `ModelManifests` (NVARCHAR(MAX) JSON metadata) | `InferenceSessions` (VARBINARY(MAX) for KV‑cache) |
+| `ModelBlobs` (VARBINARY(MAX) for weights/optimizer) | (Single table – no blob table) |
+| Storage: VARBINARY(MAX) | Storage: VARBINARY(MAX) |
+| Limit: 2 GB per file | Limit: 2 GB per file |
 
 ---
 
 ### Extending with Custom Storage Backends
 
-If you need a storage backend not provided out-of-the-box (e.g., Azure Blob Storage, AWS S3, SQL Server, Redis), you can implement the appropriate interface:
+If you need a storage backend not provided out‑of‑the‑box (e.g., Azure Blob Storage, AWS S3, or MongoDB), implement the appropriate interface:
 
 - **Training:** Implement `IModelStore`.
 - **Inference:** Implement `ISessionStore`.
-
-Implement AzureBlobModelStore class with SaveAsync, LoadAsync, DeleteAsync, ListAsync methods
 
 ```csharp
 public class AzureBlobModelStore : IModelStore
@@ -512,16 +503,12 @@ public class AzureBlobModelStore : IModelStore
 }
 ```
 
-
-Once implemented, pass your custom store to the `CheckpointManager` or `SessionManager` just like the built-in providers:
-
-Instantiate AzureBlobModelStore and pass to CheckpointManager
+Once implemented, pass your custom store to the manager:
 
 ```csharp
 var azureStore = new AzureBlobModelStore("connection-string", "container-name");
 var manager = new CheckpointManager(azureStore);
 ```
-
 
 ## Dependencies & Roadmap
 
