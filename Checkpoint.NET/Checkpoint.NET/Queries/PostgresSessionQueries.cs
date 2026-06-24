@@ -1,10 +1,10 @@
-﻿namespace Checkpoint.NET.Stores;
+﻿namespace Checkpoint.NET.Queries;
 
 /// <summary>
 /// PostgreSQL queries specific to the Inference (Session) domain.
 /// Handles KV-cache storage using BYTEA.
 /// </summary>
-internal static class PostgresQueriesSessionCheckpoint
+internal static class PostgresSessionQueries
 {
     // --- Schema ---
     public const string EnsureSessionSchema = @"

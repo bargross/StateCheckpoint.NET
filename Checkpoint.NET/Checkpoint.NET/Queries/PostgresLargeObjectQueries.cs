@@ -1,4 +1,4 @@
-﻿namespace Checkpoint.NET.Stores;
+﻿namespace Checkpoint.NET.Queries;
 
 /// <summary>
 /// Low-level PostgreSQL Large Object SQL functions.

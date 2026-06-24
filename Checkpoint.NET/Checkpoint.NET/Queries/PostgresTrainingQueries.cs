@@ -1,10 +1,10 @@
-﻿namespace Checkpoint.NET.Stores;
+﻿namespace Checkpoint.NET.Queries;
 
 /// <summary>
 /// PostgreSQL queries specific to the Training (Model) domain.
 /// Handles metadata, blob references, and schema for model checkpoints.
 /// </summary>
-internal static class PostgresQueriesTrainingCheckpoint
+internal static class PostgresTrainingQueries
 {
     // --- Schema ---
     public const string EnsureModelSchema = @"

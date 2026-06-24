@@ -1,13 +1,38 @@
 ﻿using Checkpoint.NET.Models;
 using Checkpoint.NET.Stores;
+using Checkpoint.NET.Stores.FileSystem;
 
 namespace Checkpoint.NET.Manager;
 
 public class SessionManager
 {
     private readonly ISessionStore _store;
+    private static string _defaultSessionPath = "./sessions";
 
-    public SessionManager(ISessionStore store) => _store = store;
+    /// <summary>
+    /// Initializes the manager with a custom storage provider.
+    /// </summary>
+    /// <param name="store">Any implementation of ISessionStore (FileSystem, PostgreSQL, etc.)</param>
+    public SessionManager(ISessionStore store)
+    {
+        _store = store ?? throw new ArgumentNullException(nameof(store));
+    }
+
+    /// <summary>
+    /// Initializes the manager with the default FileSystem store.
+    /// Sessions are saved to ./sessions by default.
+    /// </summary>
+    public SessionManager() : this(new FileSystemSessionStore(_defaultSessionPath))
+    {
+    }
+
+    /// <summary>
+    /// Initializes the manager with the default FileSystem store at a custom root path.
+    /// </summary>
+    /// <param name="rootPath">Root directory where sessions will be stored.</param>
+    public SessionManager(string rootPath) : this(new FileSystemSessionStore(rootPath))
+    {
+    }
 
     // Save a session state
     public async Task<Guid> SaveAsync(

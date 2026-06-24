@@ -1,8 +1,9 @@
 ﻿using System.Text.Json;
 using Npgsql;
 using Checkpoint.NET.Models;
+using Checkpoint.NET.Queries;
 
-namespace Checkpoint.NET.Stores;
+namespace Checkpoint.NET.Stores.Postgres;
 
 public class PostgresModelStore : PostgresStoreBase, IModelStore
 {
@@ -19,7 +20,7 @@ public class PostgresModelStore : PostgresStoreBase, IModelStore
     {
         var conn = await GetConnectionAsync(ct);
 
-        await using var cmd = new NpgsqlCommand(PostgresQueriesTrainingCheckpoint.EnsureModelSchema, conn);
+        await using var cmd = new NpgsqlCommand(PostgresTrainingQueries.EnsureModelSchema, conn);
 
         await cmd.ExecuteNonQueryAsync(ct);
     }
@@ -31,7 +32,7 @@ public class PostgresModelStore : PostgresStoreBase, IModelStore
         await using var tx = await conn.BeginTransactionAsync(ct);
 
         // 1. Upsert metadata (Domain-specific)
-        await using var cmd = new NpgsqlCommand(PostgresQueriesTrainingCheckpoint.UpsertModelManifest, conn, tx);
+        await using var cmd = new NpgsqlCommand(PostgresTrainingQueries.UpsertModelManifest, conn, tx);
 
         cmd.Parameters.AddWithValue("@id", checkpoint.ModelId);
         cmd.Parameters.AddWithValue("@hp", JsonSerializer.Serialize(checkpoint.HyperParams, _jsonOpts));
@@ -45,9 +46,12 @@ public class PostgresModelStore : PostgresStoreBase, IModelStore
 
         // 2. Get existing OIDs (Domain-specific)
         uint oldWeightsOid = 0, oldOptimizerOid = 0;
-        await using var selectCmd = new NpgsqlCommand(PostgresQueriesTrainingCheckpoint.SelectModelBlobOids, conn, tx);
+        await using var selectCmd = new NpgsqlCommand(PostgresTrainingQueries.SelectModelBlobOids, conn, tx);
+
         selectCmd.Parameters.AddWithValue("@id", checkpoint.ModelId);
+
         await using var reader = await selectCmd.ExecuteReaderAsync(ct);
+
         if (await reader.ReadAsync(ct))
         {
             oldWeightsOid = reader.GetFieldValue<uint>(0);
@@ -68,10 +72,12 @@ public class PostgresModelStore : PostgresStoreBase, IModelStore
         if (oldOptimizerOid != 0) await UnlinkLargeObjectAsync(conn, tx, oldOptimizerOid, ct);
 
         // 6. Save OID references (Domain-specific)
-        await using var refCmd = new NpgsqlCommand(PostgresQueriesTrainingCheckpoint.UpsertModelBlobRefs, conn, tx);
+        await using var refCmd = new NpgsqlCommand(PostgresTrainingQueries.UpsertModelBlobRefs, conn, tx);
+
         refCmd.Parameters.AddWithValue("@id", checkpoint.ModelId);
         refCmd.Parameters.AddWithValue("@wOid", weightsOid);
         refCmd.Parameters.AddWithValue("@oOid", optimizerOid);
+
         await refCmd.ExecuteNonQueryAsync(ct);
 
         await tx.CommitAsync(ct);
@@ -81,29 +87,36 @@ public class PostgresModelStore : PostgresStoreBase, IModelStore
     private static async Task<uint> CreateLargeObjectAsync(NpgsqlConnection conn, NpgsqlTransaction tx, CancellationToken ct)
     {
         await using var cmd = new NpgsqlCommand(PostgresLargeObjectQueries.CreateLargeObject, conn, tx);
+
         var result = await cmd.ExecuteScalarAsync(ct);
+
         return Convert.ToUInt32(result);
     }
 
     private static async Task WriteLargeObjectAsync(NpgsqlConnection conn, NpgsqlTransaction tx, uint oid, byte[] data, CancellationToken ct)
     {
         await using var openCmd = new NpgsqlCommand(PostgresLargeObjectQueries.OpenWrite, conn, tx);
+
         openCmd.Parameters.AddWithValue("@oid", oid);
+
         var fd = Convert.ToInt32(await openCmd.ExecuteScalarAsync(ct));
 
         try
         {
             const int chunkSize = 8192;
-            int offset = 0;
+            var offset = 0;
             while (offset < data.Length)
             {
-                int bytesToWrite = Math.Min(chunkSize, data.Length - offset);
-                byte[] chunk = new byte[bytesToWrite];
+                var bytesToWrite = Math.Min(chunkSize, data.Length - offset);
+                var chunk = new byte[bytesToWrite];
+
                 Array.Copy(data, offset, chunk, 0, bytesToWrite);
 
                 await using var writeCmd = new NpgsqlCommand(PostgresLargeObjectQueries.WriteChunk, conn, tx);
+
                 writeCmd.Parameters.AddWithValue("@fd", fd);
                 writeCmd.Parameters.AddWithValue("@data", chunk);
+
                 await writeCmd.ExecuteScalarAsync(ct);
 
                 offset += bytesToWrite;
@@ -112,7 +125,9 @@ public class PostgresModelStore : PostgresStoreBase, IModelStore
         finally
         {
             await using var closeCmd = new NpgsqlCommand(PostgresLargeObjectQueries.CloseLargeObject, conn, tx);
+
             closeCmd.Parameters.AddWithValue("@fd", fd);
+
             await closeCmd.ExecuteScalarAsync(ct);
         }
     }
@@ -120,7 +135,9 @@ public class PostgresModelStore : PostgresStoreBase, IModelStore
     private static async Task UnlinkLargeObjectAsync(NpgsqlConnection conn, NpgsqlTransaction tx, uint oid, CancellationToken ct)
     {
         await using var cmd = new NpgsqlCommand(PostgresLargeObjectQueries.UnlinkLargeObject, conn, tx);
+
         cmd.Parameters.AddWithValue("@oid", oid);
+
         await cmd.ExecuteScalarAsync(ct);
     }
 
@@ -137,19 +154,24 @@ public class PostgresModelStore : PostgresStoreBase, IModelStore
             long size = Convert.ToInt64(await sizeCmd.ExecuteScalarAsync(ct));
 
             await using var seekCmd = new NpgsqlCommand(PostgresLargeObjectQueries.SeekStart, conn);
+
             seekCmd.Parameters.AddWithValue("@fd", fd);
+
             await seekCmd.ExecuteScalarAsync(ct);
 
             using var ms = new MemoryStream((int)size);
             const int chunkSize = 8192;
-            int totalRead = 0;
+            var totalRead = 0;
 
             while (totalRead < size)
             {
-                int bytesToRead = (int)Math.Min(chunkSize, size - totalRead);
+                var bytesToRead = (int)Math.Min(chunkSize, size - totalRead);
+
                 await using var readCmd = new NpgsqlCommand(PostgresLargeObjectQueries.ReadChunk, conn);
+                
                 readCmd.Parameters.AddWithValue("@fd", fd);
                 readCmd.Parameters.AddWithValue("@length", bytesToRead);
+                
                 var result = await readCmd.ExecuteScalarAsync(ct);
 
                 if (result is byte[] chunk)
@@ -157,10 +179,7 @@ public class PostgresModelStore : PostgresStoreBase, IModelStore
                     await ms.WriteAsync(chunk, 0, chunk.Length, ct);
                     totalRead += chunk.Length;
                 }
-                else
-                {
-                    break;
-                }
+                else break;
             }
 
             return ms.ToArray();
@@ -168,7 +187,9 @@ public class PostgresModelStore : PostgresStoreBase, IModelStore
         finally
         {
             await using var closeCmd = new NpgsqlCommand(PostgresLargeObjectQueries.CloseLargeObject, conn);
+
             closeCmd.Parameters.AddWithValue("@fd", fd);
+
             await closeCmd.ExecuteScalarAsync(ct);
         }
     }
@@ -178,7 +199,7 @@ public class PostgresModelStore : PostgresStoreBase, IModelStore
     {
         var conn = await GetConnectionAsync(ct);
 
-        await using var cmd = new NpgsqlCommand(PostgresQueriesTrainingCheckpoint.SelectFullModelManifest, conn);
+        await using var cmd = new NpgsqlCommand(PostgresTrainingQueries.SelectFullModelManifest, conn);
         cmd.Parameters.AddWithValue("@id", modelId);
 
         await using var reader = await cmd.ExecuteReaderAsync(ct);
@@ -218,7 +239,7 @@ public class PostgresModelStore : PostgresStoreBase, IModelStore
         var conn = await GetConnectionAsync(ct);
         await using var tx = await conn.BeginTransactionAsync(ct);
 
-        await using var selectCmd = new NpgsqlCommand(PostgresQueriesTrainingCheckpoint.SelectModelBlobOids, conn, tx);
+        await using var selectCmd = new NpgsqlCommand(PostgresTrainingQueries.SelectModelBlobOids, conn, tx);
 
         selectCmd.Parameters.AddWithValue("@id", modelId);
 
@@ -233,12 +254,9 @@ public class PostgresModelStore : PostgresStoreBase, IModelStore
             await UnlinkLargeObjectAsync(conn, tx, wOid, ct);
             await UnlinkLargeObjectAsync(conn, tx, oOid, ct);
         }
-        else
-        {
-            await reader.CloseAsync();
-        }
+        else await reader.CloseAsync();
 
-        await using var delCmd = new NpgsqlCommand(PostgresQueriesTrainingCheckpoint.DeleteModelManifest, conn, tx);
+        await using var delCmd = new NpgsqlCommand(PostgresTrainingQueries.DeleteModelManifest, conn, tx);
 
         delCmd.Parameters.AddWithValue("@id", modelId);
 
@@ -252,8 +270,8 @@ public class PostgresModelStore : PostgresStoreBase, IModelStore
     {
         var conn = await GetConnectionAsync(ct);
         var sql = string.IsNullOrEmpty(tagKey) || string.IsNullOrEmpty(tagValue)
-            ? PostgresQueriesTrainingCheckpoint.ListAllModelIds
-            : PostgresQueriesTrainingCheckpoint.ListModelIdsByTag;
+            ? PostgresTrainingQueries.ListAllModelIds
+            : PostgresTrainingQueries.ListModelIdsByTag;
 
         await using var cmd = new NpgsqlCommand(sql, conn);
         if (!string.IsNullOrEmpty(tagKey) && !string.IsNullOrEmpty(tagValue))
@@ -262,8 +280,9 @@ public class PostgresModelStore : PostgresStoreBase, IModelStore
             cmd.Parameters.AddWithValue("@value", tagValue);
         }
 
-        var list = new List<Guid>();
         await using var reader = await cmd.ExecuteReaderAsync(ct);
+        
+        var list = new List<Guid>();
         while (await reader.ReadAsync(ct))
             list.Add(reader.GetGuid(0));
 

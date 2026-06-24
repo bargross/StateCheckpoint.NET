@@ -1,6 +1,6 @@
 ﻿using Checkpoint.NET.Models;
 
-namespace Checkpoint.NET.Stores;
+namespace Checkpoint.NET.Stores.FileSystem;
 
 public class FileSystemSessionStore : ISessionStore
 {
@@ -58,15 +58,15 @@ public class FileSystemSessionStore : ISessionStore
             _options,
             binaryFileName: "kv.bin",
             metaFileName: "meta.json",
-            ct: ct);
+            cancellationToken: ct);
     }
 
-    public async Task<SessionCheckpoint?> LoadAsync(Guid sessionId, CancellationToken ct = default)
+    public async Task<SessionCheckpoint?> LoadAsync(Guid sessionId, CancellationToken cancellationToken = default)
     {
         try
         {
             var (kv, manifest) = await FileSystemHelper.LoadAsync<SessionManifest>(
-                _rootPath, sessionId, "kv.bin", "meta.json", ct);
+                _rootPath, sessionId, "kv.bin", "meta.json", cancellationToken);
 
             return new SessionCheckpoint
             {
@@ -85,12 +85,12 @@ public class FileSystemSessionStore : ISessionStore
         }
     }
 
-    public Task DeleteAsync(Guid sessionId, CancellationToken ct = default)
-        => FileSystemHelper.DeleteAsync(_rootPath, sessionId, ct);
+    public Task DeleteAsync(Guid sessionId, CancellationToken cancellationToken = default)
+        => FileSystemHelper.DeleteAsync(_rootPath, sessionId, cancellationToken);
 
-    public Task<List<Guid>> ListAsync(string? tagKey = null, string? tagValue = null, CancellationToken ct = default)
+    public Task<List<Guid>> ListAsync(string? tagKey = null, string? tagValue = null, CancellationToken cancellationToken = default)
     {
         // Tag filtering is ignored for Phase 1 FileSystem.
-        return FileSystemHelper.ListAsync(_rootPath, ct);
+        return FileSystemHelper.ListAsync(_rootPath, cancellationToken);
     }
 }

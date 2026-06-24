@@ -1,8 +1,9 @@
 ﻿using System.Text.Json;
 using Npgsql;
 using Checkpoint.NET.Models;
+using Checkpoint.NET.Queries;
 
-namespace Checkpoint.NET.Stores;
+namespace Checkpoint.NET.Stores.Postgres;
 
 public class PostgresSessionStore : PostgresStoreBase, ISessionStore
 {
@@ -18,7 +19,7 @@ public class PostgresSessionStore : PostgresStoreBase, ISessionStore
     {
         var conn = await GetConnectionAsync(ct);
 
-        await using var cmd = new NpgsqlCommand(PostgresQueriesSessionCheckpoint.EnsureSessionSchema, conn);
+        await using var cmd = new NpgsqlCommand(PostgresSessionQueries.EnsureSessionSchema, conn);
 
         await cmd.ExecuteNonQueryAsync(ct);
     }
@@ -27,7 +28,7 @@ public class PostgresSessionStore : PostgresStoreBase, ISessionStore
     {
         var conn = await GetConnectionAsync(ct);
 
-        await using var cmd = new NpgsqlCommand(PostgresQueriesSessionCheckpoint.UpsertInferenceSession, conn);
+        await using var cmd = new NpgsqlCommand(PostgresSessionQueries.UpsertInferenceSession, conn);
 
         cmd.Parameters.AddWithValue("@id", session.SessionId);
         cmd.Parameters.AddWithValue("@fp", session.ModelFingerprint);
@@ -44,7 +45,7 @@ public class PostgresSessionStore : PostgresStoreBase, ISessionStore
     {
         var conn = await GetConnectionAsync(ct);
 
-        await using var cmd = new NpgsqlCommand(PostgresQueriesSessionCheckpoint.SelectInferenceSession, conn);
+        await using var cmd = new NpgsqlCommand(PostgresSessionQueries.SelectInferenceSession, conn);
         cmd.Parameters.AddWithValue("@id", sessionId);
 
         await using var reader = await cmd.ExecuteReaderAsync(ct);
@@ -65,7 +66,7 @@ public class PostgresSessionStore : PostgresStoreBase, ISessionStore
     public async Task DeleteAsync(Guid sessionId, CancellationToken ct = default)
     {
         var conn = await GetConnectionAsync(ct);
-        await using var cmd = new NpgsqlCommand(PostgresQueriesSessionCheckpoint.DeleteInferenceSession, conn);
+        await using var cmd = new NpgsqlCommand(PostgresSessionQueries.DeleteInferenceSession, conn);
         cmd.Parameters.AddWithValue("@id", sessionId);
         await cmd.ExecuteNonQueryAsync(ct);
     }
@@ -74,8 +75,8 @@ public class PostgresSessionStore : PostgresStoreBase, ISessionStore
     {
         var conn = await GetConnectionAsync(ct);
         var sql = string.IsNullOrEmpty(tagKey) || string.IsNullOrEmpty(tagValue)
-            ? PostgresQueriesSessionCheckpoint.ListAllSessionIds
-            : PostgresQueriesSessionCheckpoint.ListSessionIdsByTag;
+            ? PostgresSessionQueries.ListAllSessionIds
+            : PostgresSessionQueries.ListSessionIdsByTag;
 
         await using var cmd = new NpgsqlCommand(sql, conn);
         if (!string.IsNullOrEmpty(tagKey) && !string.IsNullOrEmpty(tagValue))

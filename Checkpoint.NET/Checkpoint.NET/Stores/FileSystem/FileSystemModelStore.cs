@@ -1,6 +1,6 @@
 ﻿using Checkpoint.NET.Models;
 
-namespace Checkpoint.NET.Stores;
+namespace Checkpoint.NET.Stores.FileSystem;
 
 public class FileSystemModelStore : IModelStore
 {
@@ -39,7 +39,7 @@ public class FileSystemModelStore : IModelStore
         }
     }
 
-    public async Task SaveAsync(ModelCheckpoint checkpoint, CancellationToken ct = default)
+    public async Task SaveAsync(ModelCheckpoint checkpoint, CancellationToken cancellationToken = default)
     {
         var manifest = new ModelManifest
         {
@@ -59,15 +59,15 @@ public class FileSystemModelStore : IModelStore
             _options,
             binaryFileName: "weights.bin",
             metaFileName: "manifest.json",
-            ct: ct);
+            cancellationToken: cancellationToken);
     }
 
-    public async Task<ModelCheckpoint?> LoadAsync(Guid modelId, CancellationToken ct = default)
+    public async Task<ModelCheckpoint?> LoadAsync(Guid modelId, CancellationToken cancellationToken = default)
     {
         try
         {
             var (weights, manifest) = await FileSystemHelper.LoadAsync<ModelManifest>(
-                _rootPath, modelId, "weights.bin", "manifest.json", ct);
+                _rootPath, modelId, "weights.bin", "manifest.json", cancellationToken);
 
             return new ModelCheckpoint
             {
@@ -87,13 +87,13 @@ public class FileSystemModelStore : IModelStore
         }
     }
 
-    public Task DeleteAsync(Guid modelId, CancellationToken ct = default)
-        => FileSystemHelper.DeleteAsync(_rootPath, modelId, ct);
+    public Task DeleteAsync(Guid modelId, CancellationToken cancellationToken = default)
+        => FileSystemHelper.DeleteAsync(_rootPath, modelId, cancellationToken);
 
-    public Task<List<Guid>> ListAsync(string? tagKey = null, string? tagValue = null, CancellationToken ct = default)
+    public Task<List<Guid>> ListAsync(string? tagKey = null, string? tagValue = null, CancellationToken cancellationToken = default)
     {
         // Tag filtering is ignored for Phase 1 FileSystem.
         // The manager can filter in-memory if needed.
-        return FileSystemHelper.ListAsync(_rootPath, ct);
+        return FileSystemHelper.ListAsync(_rootPath, cancellationToken);
     }
 }

@@ -14,9 +14,15 @@ internal static class FileSystemHelper
         FileSystemStoreOptions options,
         string binaryFileName = "data.bin",
         string metaFileName = "meta.json",
-        CancellationToken ct = default) where TMetadata : class
+        CancellationToken cancellationToken = default) where TMetadata : class
     {
+        // Fail fast if cancellation is already requested
+        cancellationToken.ThrowIfCancellationRequested();
+
         var dir = Path.Combine(rootPath, id.ToString());
+
+        // Check cancellation before synchronous directory operations
+        cancellationToken.ThrowIfCancellationRequested();
 
         if (options.EnsureDirectoryExists)
         {
@@ -30,13 +36,17 @@ internal static class FileSystemHelper
                 "Please create the directory manually or enable EnsureDirectoryExists.");
         }
 
+        // Check cancellation before synchronous write access test
+        cancellationToken.ThrowIfCancellationRequested();
+
         // Validate write access (optional runtime check)
         if (!TryValidateWriteAccess(dir, out var error))
         {
             if (!string.IsNullOrEmpty(options.FallbackPath))
             {
-                var fallbackDir = Path.Combine(options.FallbackPath, id.ToString());
+                cancellationToken.ThrowIfCancellationRequested();
 
+                var fallbackDir = Path.Combine(options.FallbackPath, id.ToString());
                 Directory.CreateDirectory(fallbackDir);
 
                 // Recursively call with the fallback path
@@ -48,7 +58,7 @@ internal static class FileSystemHelper
                     options,
                     binaryFileName,
                     metaFileName,
-                    ct);
+                    cancellationToken);
 
                 return;
             }
@@ -56,11 +66,14 @@ internal static class FileSystemHelper
             throw error!;
         }
 
-        await File.WriteAllBytesAsync(Path.Combine(dir, binaryFileName), binaryData, ct);
+        // Check cancellation before async file writes
+        cancellationToken.ThrowIfCancellationRequested();
+
+        await File.WriteAllBytesAsync(Path.Combine(dir, binaryFileName), binaryData, cancellationToken);
 
         var json = JsonSerializer.Serialize(metadata, _jsonOpts);
 
-        await File.WriteAllTextAsync(Path.Combine(dir, metaFileName), json, ct);
+        await File.WriteAllTextAsync(Path.Combine(dir, metaFileName), json, cancellationToken);
     }
 
     public static async Task<(byte[] Binary, TMetadata Metadata)> LoadAsync<TMetadata>(
@@ -68,8 +81,11 @@ internal static class FileSystemHelper
         Guid id,
         string binaryFileName = "data.bin",
         string metaFileName = "meta.json",
-        CancellationToken ct = default) where TMetadata : class, new()
+        CancellationToken cancellationToken = default) where TMetadata : class, new()
     {
+        // Fail fast if cancellation is already requested
+        cancellationToken.ThrowIfCancellationRequested();
+
         var dir = Path.Combine(rootPath, id.ToString());
         var binaryPath = Path.Combine(dir, binaryFileName);
         var metaPath = Path.Combine(dir, metaFileName);
@@ -77,27 +93,45 @@ internal static class FileSystemHelper
         if (!File.Exists(metaPath) || !File.Exists(binaryPath))
             throw new FileNotFoundException($"Checkpoint {id} not found in {rootPath}");
 
-        var binary = await File.ReadAllBytesAsync(binaryPath, ct);
-        var json = await File.ReadAllTextAsync(metaPath, ct);
+        // Check cancellation before async reads
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var binary = await File.ReadAllBytesAsync(binaryPath, cancellationToken);
+        var json = await File.ReadAllTextAsync(metaPath, cancellationToken);
         var metadata = JsonSerializer.Deserialize<TMetadata>(json)!;
 
         return (binary, metadata);
     }
 
-    public static Task DeleteAsync(string rootPath, Guid id, CancellationToken ct = default)
+    public static Task DeleteAsync(string rootPath, Guid id, CancellationToken cancellationToken = default)
     {
+        // Fail fast if cancellation is already requested
+        cancellationToken.ThrowIfCancellationRequested();
+
         var dir = Path.Combine(rootPath, id.ToString());
+
+        // Check cancellation before synchronous directory deletion
+        cancellationToken.ThrowIfCancellationRequested();
+
         if (Directory.Exists(dir))
             Directory.Delete(dir, true);
+
         return Task.CompletedTask;
     }
 
-    public static Task<List<Guid>> ListAsync(string rootPath, CancellationToken ct = default)
+    public static Task<List<Guid>> ListAsync(string rootPath, CancellationToken cancellationToken = default)
     {
+        // Fail fast if cancellation is already requested
+        cancellationToken.ThrowIfCancellationRequested();
+
         var dirs = Directory.GetDirectories(rootPath);
         var guids = new List<Guid>();
+
         foreach (var dir in dirs)
         {
+            // Check cancellation during the loop (for long-running enumerations)
+            cancellationToken.ThrowIfCancellationRequested();
+
             if (Guid.TryParse(Path.GetFileName(dir), out var id))
                 guids.Add(id);
         }
@@ -116,8 +150,10 @@ internal static class FileSystemHelper
 
             // Test write access by creating and deleting a temporary file
             var testFile = Path.Combine(path, $".checkpoint_net_test_{Guid.NewGuid()}.tmp");
+
             File.WriteAllText(testFile, "test");
             File.Delete(testFile);
+
             return true;
         }
         catch (UnauthorizedAccessException ex)

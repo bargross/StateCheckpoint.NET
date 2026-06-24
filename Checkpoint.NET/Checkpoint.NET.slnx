@@ -1,3 +1,9 @@
 <Solution>
+  <Folder Name="/Docs/">
+    <File Path="../README.md" />
+  </Folder>
+  <Folder Name="/workflows/">
+    <File Path="../.github/workflows/dotnet.yml" />
+  </Folder>
   <Project Path="Checkpoint.NET/Checkpoint.NET.csproj" />
 </Solution>
