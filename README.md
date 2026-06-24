@@ -316,7 +316,7 @@ var sessionManager = new SessionManager(sessionStore);
 ```
 
 
-**Configuration Options:**
+### File System Configuration Options
 
 You can customize the behavior of FileSystem stores using `FileSystemStoreOptions`.
 
@@ -338,6 +338,83 @@ var store = new FileSystemModelStore("./protected_models", options);
 | `EnsureDirectoryExists` | If `true`, the library creates the directory. If `false`, throws a `DirectoryNotFoundException` if the path is missing. |
 | `ValidatePermissionsOnStartup` | If `true`, the library tests write permissions in the constructor by creating and deleting a temporary file. If `false`, permissions are only checked when `SaveAsync` or `LoadAsync` is called. |
 | `FallbackPath` | An optional absolute or relative path to use if the primary directory is inaccessible due to permission errors. Useful for CI/CD environments or containerized deployments. |
+
+
+### Background Saves Configuration Options
+
+Enable non‑blocking saves to prevent disk I/O from stalling your training or inference loops. Background saves are configured using `BackgroundSaveOptions`.
+
+| Property | Description |
+| :--- | :--- |
+| `Enabled` | Turns background saves on or off. When enabled, saves become fire‑and‑forget and the manager returns immediately after enqueuing the save operation. |
+| `QueueCapacity` | Defines the maximum number of pending save operations. If the queue exceeds this capacity, the caller blocks until space frees up, providing backpressure to prevent memory exhaustion. |
+| `OnError` | Optional callback invoked when a background save fails. If not provided, exceptions are silently swallowed to prevent training crashes. |
+
+**Example – Training with Background Saves:**
+
+```csharp
+using Checkpoint.NET.Manager;
+using Checkpoint.NET.Models;
+using Checkpoint.NET.Stores;
+
+// Configure background saves
+var options = new BackgroundSaveOptions
+{
+    Enabled = true,
+    QueueCapacity = 5,
+    OnError = ex => Console.WriteLine($"Background save failed: {ex.Message}")
+};
+
+// Create the manager with background mode enabled
+await using var manager = new CheckpointManager(options);
+
+// During training, save checkpoints without blocking
+Guid modelId = await manager.SaveAsync(
+    weights: weightBytes,
+    optimizer: optimizerStateBytes,
+    hyperParams: hyperParams,
+    tokenizer: tokenizer,
+    epoch: currentEpoch,
+    loss: currentLoss
+);
+
+// The method returns immediately; the actual save runs in the background.
+// Continue training without waiting for disk I/O.
+```
+
+**Example – Inference Sessions with Background Saves:**
+
+```csharp
+using Checkpoint.NET.Manager;
+using Checkpoint.NET.Models;
+using Checkpoint.NET.Stores;
+
+var options = new BackgroundSaveOptions
+{
+    Enabled = true,
+    QueueCapacity = 3,
+    OnError = ex => Console.WriteLine($"Background session save failed: {ex.Message}")
+};
+
+await using var sessionManager = new SessionManager(options);
+
+// Save the session – returns immediately
+Guid chatId = await sessionManager.SaveAsync(
+    sessionId: currentChatId,
+    kvCacheBytes: kvCache,
+    tokenHistory: tokenHistory,
+    modelFingerprint: "llama-2-7b-v1"
+);
+
+// Continue the conversation without waiting for the save to finish.
+```
+
+**⚠️ Important:** When using background saves (`Enabled = true`), always wrap your manager in an `await using` block or explicitly call `DisposeAsync()` before your application exits. This ensures that all pending saves complete and the background thread is properly cleaned up.
+
+```csharp
+// At the end of your application:
+await manager.DisposeAsync(); // Flushes the background queue.
+```
 
 ---
 
