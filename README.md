@@ -2,23 +2,19 @@
 
 [![NuGet Version](https://img.shields.io/nuget/v/Checkpoint.NET)](https://www.nuget.org/packages/Checkpoint.NET/)
 [![.NET](https://img.shields.io/badge/.NET-10.0-blue)](https://dotnet.microsoft.com/)
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Build Status](https://img.shields.io/github/actions/workflow/status/bargross/Checkpoint.NET/dotnet.yml?branch=main)](https://github.com/bargross/Checkpoint.NET/actions)
-
-## Why Checkpoint.NET?
-
-Training large language models and running inference on them is expensive and time‑consuming. A crash or an I/O stall can waste hours of GPU time. Checkpoint.NET solves this by:
-
-- **Running saves in the background:** Your training loop isn't blocked by disk writes.
-- **Ensuring data integrity:** Deep copying prevents in‑memory mutations from corrupting your checkpoints.
-- **Being framework‑agnostic:** Use it with any C# ML library or your own custom math.
-- **Managing both training and inference:** Save model weights, optimizer states, AND inference session states (KV‑cache + token history).
-
----
 
 ## What is Checkpoint.NET?
 
-Checkpoint.NET is the ultimate state persistence layer for C# machine learning. Persist full training checkpoints (Weights + Optimizer + Tokenizer + Hyperparameters) and inference sessions (KV‑Cache + Token History) across FileSystem, PostgreSQL, or SQL Server. Zero framework lock‑in, fully async, and managed entirely by GUIDs—built for custom training loops first.
+Training large language models is expensive and time‑consuming. A crash or an I/O stall can waste hours of GPU time. Checkpoint.NET is the ultimate state persistence layer for C# machine learning. It solves these problems by:
+
+- **Running saves in the background** – Your training loop isn't blocked by disk writes.
+- **Ensuring data integrity** – Deep copying prevents in‑memory mutations from corrupting your checkpoints.
+- **Being framework‑agnostic** – Use it with any C# ML library or your own custom math.
+- **Managing both training and inference** – Save model weights, optimizer states, AND inference session states (KV‑cache + token history).
+
+Persist full training checkpoints (Weights + Optimizer + Tokenizer + Hyperparameters) and inference sessions (KV‑Cache + Token History) across FileSystem, PostgreSQL, or SQL Server. Zero framework lock‑in, fully async, and managed entirely by GUIDs—built for custom training loops first.
 
 ---
 
@@ -518,3 +514,29 @@ If you only use FileSystem, you will still see `Npgsql.dll` and `Microsoft.Data.
 
 **Future v2.0 (Modular):**
 We plan to split the library into separate NuGet packages (`Checkpoint.NET.Core`, `Checkpoint.NET.PostgreSQL`, `Checkpoint.NET.SqlServer`) to remove these optional dependencies. The v1.0.0 API will remain fully compatible with v2.0.
+
+## License
+
+This project is licensed under the **Apache License, Version 2.0** – see the [LICENSE](./LICENSE) file for details.
+
+```
+Copyright 2025 Leon
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```
+
+## Acknowledgements
+
+- [Npgsql](https://www.npgsql.org/) – PostgreSQL provider for .NET.
+- [Microsoft.Data.SqlClient](https://github.com/dotnet/SqlClient) – SQL Server provider for .NET.
+- [Testcontainers](https://testcontainers.com/) – Integration testing with containers.
