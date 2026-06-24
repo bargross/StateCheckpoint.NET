@@ -3,7 +3,7 @@
 [![NuGet Version](https://img.shields.io/nuget/v/Checkpoint.NET)](https://www.nuget.org/packages/Checkpoint.NET/)
 [![.NET](https://img.shields.io/badge/.NET-10.0-blue)](https://dotnet.microsoft.com/)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Build Status](https://img.shields.io/github/actions/workflow/status/bargross/Checkpoint.NET/ci.yml?branch=main)](https://github.com/bargross/Checkpoint.NET/actions)
+[![Build Status](https://img.shields.io/github/actions/workflow/status/bargross/Checkpoint.NET/dotnet.yml?branch=main)](https://github.com/bargross/Checkpoint.NET/actions)
 
 ## Why Checkpoint.NET?
 
