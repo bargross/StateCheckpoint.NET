@@ -39,13 +39,13 @@ jobs:
         dotnet-version: ${{ matrix.dotnet }}
 
     - name: Restore dependencies
-      run: dotnet restore Checkpoint.NET/Checkpoint.NET.csproj
+      run: dotnet restore Checkpoint.NET/Checkpoint.NET/Checkpoint.NET.csproj
 
     - name: Build
-      run: dotnet build Checkpoint.NET/Checkpoint.NET.csproj --no-restore --configuration Release
+      run: dotnet build Checkpoint.NET/Checkpoint.NET/Checkpoint.NET.csproj --no-restore --configuration Release
 
     - name: Run tests
-      run: dotnet test Checkpoint.NET/Checkpoint.NET.csproj --no-build --configuration Release --verbosity normal
+      run: dotnet test Checkpoint.NET/Checkpoint.NET/Checkpoint.NET.csproj --no-build --configuration Release --verbosity normal
 
   publish:
     name: Publish to NuGet
@@ -67,7 +67,7 @@ jobs:
 
     - name: Pack NuGet package
       run: |
-        dotnet pack Checkpoint.NET/Checkpoint.NET.csproj \
+        dotnet pack Checkpoint.NET/Checkpoint.NET/Checkpoint.NET.csproj \
           --configuration Release \
           --output ./nupkgs \
           -p:PackageVersion="${GITHUB_REF#refs/tags/v}" \
