@@ -43,7 +43,7 @@ internal static class FileSystemHelper
         // Validate write access (optional runtime check)
         if (!TryValidateWriteAccess(dir, out var error))
         {
-            if (!string.IsNullOrEmpty(options.FallbackPath))
+            if (!string.IsNullOrWhiteSpace(options.FallbackPath))
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
@@ -275,5 +275,21 @@ internal static class FileSystemHelper
                 ex);
             return false;
         }
+    }
+
+    public static async Task<TMetadata?> LoadManifestOnlyAsync<TMetadata>(
+        string rootPath,
+        Guid id,
+        string metaFileName = "meta.json",
+        CancellationToken cancellationToken = default) where TMetadata : class, new()
+    {
+        var metaPath = Path.Combine(rootPath, id.ToString(), metaFileName);
+
+        if (!File.Exists(metaPath))
+            return null;
+
+        var json = await File.ReadAllTextAsync(metaPath, cancellationToken);
+
+        return JsonSerializer.Deserialize<TMetadata>(json);
     }
 }

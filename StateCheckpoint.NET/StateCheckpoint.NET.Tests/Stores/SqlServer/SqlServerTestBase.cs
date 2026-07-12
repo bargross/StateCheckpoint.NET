@@ -1,5 +1,4 @@
 ﻿using StateCheckpoint.NET.Stores;
-using StateCheckpoint.NET.Stores.Mysql;
 using Microsoft.Data.SqlClient;
 
 namespace StateCheckpoint.NET.Tests.Stores.SqlServer;
@@ -50,7 +49,6 @@ public abstract class SqlServerTestBase : IAsyncLifetime
 
     public async Task DisposeAsync()
     {
-        // ✅ Truncate all tables to clean up after each test.
         try
         {
             await using var connection = new SqlConnection(_connectionString);

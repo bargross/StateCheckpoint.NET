@@ -1,7 +1,6 @@
 ﻿using StateCheckpoint.NET.Models;
 using StateCheckpoint.NET.Settings;
 using StateCheckpoint.NET.Stores;
-using StateCheckpoint.NET.Stores.FileSystem;
 
 namespace StateCheckpoint.NET.Manager;
 
@@ -111,10 +110,7 @@ public class SessionManager : IAsyncDisposable
                 Tags = session.Tags
             };
 
-            _backgroundSaver.Enqueue(async (cToken) =>
-            {
-                await _store.SaveAsync(capturedSession, cToken);
-            });
+            await _backgroundSaver.EnqueueAsync(async (cToken) => await _store.SaveAsync(capturedSession, cToken));
 
             return session.SessionId;
         }

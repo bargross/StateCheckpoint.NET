@@ -1,7 +1,7 @@
 ﻿using StateCheckpoint.NET.Models;
 using StateCheckpoint.NET.Settings;
 
-namespace StateCheckpoint.NET.Stores.FileSystem;
+namespace StateCheckpoint.NET.Stores;
 
 public class FileSystemSessionStore : ISessionStore
 {
@@ -89,9 +89,22 @@ public class FileSystemSessionStore : ISessionStore
     public Task DeleteAsync(Guid sessionId, CancellationToken cancellationToken = default)
         => FileSystemHelper.DeleteAsync(_rootPath, sessionId, cancellationToken);
 
-    public Task<List<Guid>> ListAsync(string? tagKey = null, string? tagValue = null, CancellationToken cancellationToken = default)
+    public async Task<List<Guid>> ListAsync(string? tagKey = null, string? tagValue = null, CancellationToken cancellationToken = default)
     {
-        // Tag filtering is ignored for Phase 1 FileSystem.
-        return FileSystemHelper.ListAsync(_rootPath, cancellationToken);
+        var allIds = await FileSystemHelper.ListAsync(_rootPath, cancellationToken);
+        if (string.IsNullOrWhiteSpace(tagKey) || string.IsNullOrWhiteSpace(tagValue))
+            return allIds;
+
+        var filtered = new List<Guid>();
+        foreach (var id in allIds)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var manifest = await FileSystemHelper.LoadManifestOnlyAsync<SessionManifest>(_rootPath, id, "meta.json", cancellationToken);
+            if (manifest != null && manifest.Tags != null && manifest.Tags.TryGetValue(tagKey, out var val) && val == tagValue)
+                filtered.Add(id);
+        }
+
+        return filtered;
     }
 }

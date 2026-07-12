@@ -1,7 +1,6 @@
 ﻿using StateCheckpoint.NET.Models;
 using StateCheckpoint.NET.Settings;
 using StateCheckpoint.NET.Stores;
-using StateCheckpoint.NET.Stores.FileSystem;
 
 namespace StateCheckpoint.NET.Manager;
 
@@ -119,10 +118,7 @@ public class CheckpointManager : IAsyncDisposable
                 Tags = checkpoint.Tags
             };
 
-            _backgroundSaver.Enqueue(async (ct) =>
-            {
-                await _store.SaveAsync(capturedCheckpoint, ct);
-            });
+            await _backgroundSaver.EnqueueAsync(async (ct) => await _store.SaveAsync(capturedCheckpoint, ct));
 
             return checkpoint.ModelId; // Returns immediately!
         }

@@ -1,9 +1,9 @@
 ﻿using System.Data;
-using StateCheckpoint.NET.Stores.Mysql;
+using StateCheckpoint.NET.Stores;
 using FluentAssertions;
 using Microsoft.Data.SqlClient;
 
-namespace StateCheckpoint.NET.Tests.Stores.Mysql;
+namespace StateCheckpoint.NET.Tests.Stores.SqlServer;
 
 [Collection("NonParallel")]
 public class SqlServerStoreBaseTests
@@ -55,21 +55,24 @@ public class SqlServerStoreBaseTests
     }
 
     [SkippableFact]
-    public async Task GetConnectionAsync_ReusesExistingOpenConnection()
+    public async Task GetConnectionAsync_WithOwnedConnection_ReturnsNewConnectionEachTime()
     {
         Skip.IfNot(IsLocalDbAvailable(), "LocalDB is not available. Skipping test.");
 
-        // Arrange
         var store = new TestableSqlServerStore(TestConnectionString);
 
         // Act
         var connection1 = await store.GetConnectionAsync();
         var connection2 = await store.GetConnectionAsync();
 
-        // Assert
-        connection1.Should().BeSameAs(connection2);
+        // Assert – each call yields a new connection from the pool
+        connection1.Should().NotBeSameAs(connection2);
+        connection1.State.Should().Be(ConnectionState.Open);
+        connection2.State.Should().Be(ConnectionState.Open);
 
         // Clean up
+        await connection1.DisposeAsync();
+        await connection2.DisposeAsync();
         await store.DisposeAsync();
     }
 
@@ -96,20 +99,21 @@ public class SqlServerStoreBaseTests
     }
 
     [SkippableFact]
-    public async Task DisposeAsync_WhenOwnsConnection_ClosesConnection()
+    public async Task DisposeAsync_WhenOwnsConnection_DoesNotCloseConnections()
     {
         Skip.IfNot(IsLocalDbAvailable(), "LocalDB is not available. Skipping test.");
 
-        // Arrange
         var store = new TestableSqlServerStore(TestConnectionString);
         var connection = await store.GetConnectionAsync();
         connection.State.Should().Be(ConnectionState.Open);
 
-        // Act
+        // Act – dispose the store
         await store.DisposeAsync();
 
-        // Assert
-        // After disposal, the connection is closed.
+        // Assert – the connection we obtained is still open (we must close it ourselves)
+        connection.State.Should().Be(ConnectionState.Open);
+
+        await connection.DisposeAsync();
         connection.State.Should().Be(ConnectionState.Closed);
     }
 
@@ -121,6 +125,7 @@ public class SqlServerStoreBaseTests
         // Arrange
         using var existingConn = new SqlConnection(TestConnectionString);
         await existingConn.OpenAsync();
+
         var store = new TestableSqlServerStore(existingConn);
 
         // Act

@@ -1,131 +1,82 @@
-﻿using System.Data;
-using StateCheckpoint.NET.Stores.Mysql;
-using FluentAssertions;
-using Microsoft.Data.SqlClient;
+﻿using FluentAssertions;
+using Npgsql;
+using StateCheckpoint.NET.Stores;
 
-namespace StateCheckpoint.NET.Tests.Stores.SqlServer;
+namespace StateCheckpoint.NET.Tests.Stores.Postgres;
 
-[Collection("NonParallel")]
-public class SqlServerStoreBaseTests : IAsyncLifetime
+public class PostgresStoreBaseTests
 {
-    private string? _connectionString;
-
-    private class TestableSqlServerStore : SqlServerStoreBase
+    // Testable subclass to expose protected members.
+    private class TestablePostgresStore : PostgresStoreBase
     {
-        public TestableSqlServerStore(string connectionString) : base(connectionString) { }
-        public TestableSqlServerStore(SqlConnection connection) : base(connection) { }
+        public TestablePostgresStore(string connectionString) : base(connectionString) { }
+        public TestablePostgresStore(NpgsqlDataSource dataSource) : base(dataSource) { }
 
-        public new async Task<SqlConnection> GetConnectionAsync(CancellationToken ct = default)
+        public new async Task<NpgsqlConnection> GetConnectionAsync(CancellationToken ct = default)
             => await base.GetConnectionAsync(ct);
     }
 
-    public async Task InitializeAsync()
-    {
-        _connectionString = await SqlServerTestHarness.GetConnectionStringAsync();
-    }
+    private const string DummyConnectionString = "Host=localhost;Database=dummy";
 
-    public async Task DisposeAsync()
+    [Fact]
+    public void Constructor_WithNullDataSource_ThrowsArgumentNullException()
     {
-        await SqlServerTestHarness.DisposeAsync();
+        // Act
+        Action act = () => new TestablePostgresStore((NpgsqlDataSource)null!);
+
+        // Assert
+        act.Should().ThrowExactly<ArgumentNullException>();
     }
 
     [Fact]
-    public async Task GetConnectionAsync_OpensConnectionLazily()
+    public async Task DisposeAsync_WhenOwnsDataSource_DisposesDataSource()
     {
-        var store = new TestableSqlServerStore(_connectionString!);
+        // Arrange
+        var store = new TestablePostgresStore(DummyConnectionString);
 
-        var connection = await store.GetConnectionAsync();
-        connection.State.Should().Be(ConnectionState.Open);
-
-        await store.DisposeAsync();
-    }
-
-    [Fact]
-    public async Task GetConnectionAsync_ReusesExistingOpenConnection()
-    {
-        var store = new TestableSqlServerStore(_connectionString!);
-
-        var connection1 = await store.GetConnectionAsync();
-        var connection2 = await store.GetConnectionAsync();
-
-        connection1.Should().BeSameAs(connection2);
-
-        await store.DisposeAsync();
-    }
-
-    [Fact]
-    public async Task Constructor_WithExistingConnection_UsesProvidedConnection()
-    {
-        using var existingConn = new SqlConnection(_connectionString!);
-        await existingConn.OpenAsync();
-
-        var store = new TestableSqlServerStore(existingConn);
-        var retrievedConn = await store.GetConnectionAsync();
-
-        retrievedConn.Should().BeSameAs(existingConn);
-        await store.DisposeAsync();
-        existingConn.State.Should().Be(ConnectionState.Open);
-        await existingConn.DisposeAsync();
-    }
-
-    [Fact]
-    public async Task DisposeAsync_WhenOwnsConnection_ClosesConnection()
-    {
-        var store = new TestableSqlServerStore(_connectionString!);
-        var connection = await store.GetConnectionAsync();
-        connection.State.Should().Be(ConnectionState.Open);
-
+        // Act
         await store.DisposeAsync();
 
-        connection.State.Should().Be(ConnectionState.Closed);
+        // Assert – GetConnectionAsync throws ObjectDisposedException.
+        Func<Task> act = () => store.GetConnectionAsync();
+        await act.Should().ThrowExactlyAsync<ObjectDisposedException>();
     }
 
     [Fact]
-    public async Task DisposeAsync_WhenNotOwnsConnection_DoesNotCloseConnection()
+    public async Task DisposeAsync_WhenNotOwnsDataSource_DoesNotDisposeDataSource()
     {
-        using var existingConn = new SqlConnection(_connectionString!);
-        await existingConn.OpenAsync();
-        var store = new TestableSqlServerStore(existingConn);
+        // Arrange – external data source (not owned by the store).
+        var externalDataSource = NpgsqlDataSource.Create(DummyConnectionString);
+        var store = new TestablePostgresStore(externalDataSource);
 
+        // Act – dispose the store.
         await store.DisposeAsync();
 
-        existingConn.State.Should().Be(ConnectionState.Open);
-        await existingConn.DisposeAsync();
+        // Assert – GetConnectionAsync should NOT throw ObjectDisposedException.
+        // (It may throw other exceptions, but that's fine – we only care about disposal.)
+        Func<Task> act = () => store.GetConnectionAsync();
+        await act.Should().NotThrowAsync<ObjectDisposedException>();
+
+        // Clean up external data source (caller's responsibility).
+        await externalDataSource.DisposeAsync();
     }
 
     [Fact]
-    public async Task DisposeAsync_MultipleCalls_DoesNotThrow()
+    public async Task DisposeAsync_WhenNotOwnsDataSource_LeavesDataSourceAlive()
     {
-        var store = new TestableSqlServerStore(_connectionString!);
-        var act = async () =>
-        {
-            await store.DisposeAsync();
-            await store.DisposeAsync();
-        };
-        await act.Should().NotThrowAsync();
-    }
+        // Arrange
+        var externalDataSource = NpgsqlDataSource.Create(DummyConnectionString);
+        var store = new TestablePostgresStore(externalDataSource);
 
-    [Fact]
-    public async Task GetConnectionAsync_RespectsCancellationToken()
-    {
-        using var cts = new CancellationTokenSource();
-        cts.Cancel();
-        var store = new TestableSqlServerStore(_connectionString!);
-
-        var act = () => store.GetConnectionAsync(cts.Token);
-        await act.Should().ThrowAsync<OperationCanceledException>();
-    }
-
-    [Fact]
-    public async Task Constructor_WithConnectionString_DoesNotOpenConnectionImmediately()
-    {
-        var store = new TestableSqlServerStore(_connectionString!);
-        var field = typeof(SqlServerStoreBase).GetField("_connection",
-            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-
-        var connectionField = field?.GetValue(store) as SqlConnection;
-        connectionField.Should().BeNull("the connection should not be created until GetConnectionAsync is called.");
-
+        // Act – dispose the store.
         await store.DisposeAsync();
+
+        // Assert – we can still open a connection (it may fail due to invalid connection string,
+        // but that's OK – the point is that the data source is not disposed).
+        // We'll try to open a connection and catch any non‑ObjectDisposedException.
+        Exception? exception = await Record.ExceptionAsync(() => store.GetConnectionAsync());
+        exception.Should().NotBeOfType<ObjectDisposedException>();
+
+        await externalDataSource.DisposeAsync();
     }
 }

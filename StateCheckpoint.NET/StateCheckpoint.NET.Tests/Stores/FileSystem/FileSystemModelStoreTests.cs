@@ -1,6 +1,6 @@
 ﻿using StateCheckpoint.NET.Models;
 using StateCheckpoint.NET.Settings;
-using StateCheckpoint.NET.Stores.FileSystem;
+using StateCheckpoint.NET.Stores;
 using FluentAssertions;
 
 namespace StateCheckpoint.NET.Tests.Stores.FileSystem;
@@ -280,18 +280,22 @@ public class FileSystemModelStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task ListAsync_WithTagFilter_ShouldIgnoreTagsAndReturnAll()
+    public async Task ListAsync_WithTagFilter_ShouldFilterByTag()
     {
         // Arrange
         var store = new FileSystemModelStore(_testRoot, _defaultOptions);
         var id1 = Guid.NewGuid();
-        await store.SaveAsync(new ModelCheckpoint { ModelId = id1, Tags = new Dictionary<string, string> { { "key", "value" } } });
+        var id2 = Guid.NewGuid();
+
+        await store.SaveAsync(new ModelCheckpoint { ModelId = id1, Tags = new Dictionary<string, string> { { "env", "prod" } } });
+        await store.SaveAsync(new ModelCheckpoint { ModelId = id2, Tags = new Dictionary<string, string> { { "env", "dev" } } });
 
         // Act
-        var ids = await store.ListAsync("key", "value");
+        var ids = await store.ListAsync("env", "prod");
 
-        // Assert - FileSystem store ignores tag filtering, so it returns all.
-        ids.Should().Contain(id1);
+        // Assert
         ids.Count.Should().Be(1);
+        ids.Should().Contain(id1);
+        ids.Should().NotContain(id2);
     }
 }

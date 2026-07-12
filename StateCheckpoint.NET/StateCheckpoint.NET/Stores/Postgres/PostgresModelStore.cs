@@ -3,7 +3,7 @@ using Npgsql;
 using NpgsqlTypes;
 using System.Text.Json;
 
-namespace StateCheckpoint.NET.Stores.Postgres;
+namespace StateCheckpoint.NET.Stores;
 
 public class PostgresModelStore : PostgresStoreBase, IModelStore
 {
@@ -20,7 +20,7 @@ public class PostgresModelStore : PostgresStoreBase, IModelStore
       /// <returns></returns>
     public async Task EnsureSchemaAsync(CancellationToken CancellationToken = default)
     {
-        var connection = await GetConnectionAsync(CancellationToken);
+        await using var connection = await GetConnectionAsync(CancellationToken);
 
         await using var command = new NpgsqlCommand(PostgresTrainingQueries.EnsureModelSchema, connection);
 
@@ -35,7 +35,7 @@ public class PostgresModelStore : PostgresStoreBase, IModelStore
     /// <returns>id for model checkpoint</returns>
     public async Task SaveAsync(ModelCheckpoint checkpoint, CancellationToken cancellationToken = default)
     {
-        var connection = await GetConnectionAsync(cancellationToken);
+        await using var connection = await GetConnectionAsync(cancellationToken);
 
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
@@ -126,15 +126,19 @@ public class PostgresModelStore : PostgresStoreBase, IModelStore
     /// <returns></returns>
     public async Task<ModelCheckpoint?> LoadAsync(Guid modelId, CancellationToken cancellationToken = default)
     {
-        var connection = await GetConnectionAsync(cancellationToken);
+        await using var connection = await GetConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
-        await using var command = new NpgsqlCommand(PostgresTrainingQueries.SelectFullModelManifest, connection);
+        await using var command = new NpgsqlCommand(PostgresTrainingQueries.SelectFullModelManifest, connection, transaction);
+
         command.Parameters.AddWithValue("@id", modelId);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
+        // Check if any row exists
         if (!await reader.ReadAsync(cancellationToken)) return null;
-
+        
+        // Read metadata
         var hyperParams = JsonSerializer.Deserialize<HyperParameters>(reader.GetString(0))!;
         var tokenizer = JsonSerializer.Deserialize<TokenizerData>(reader.GetString(1))!;
         var epoch = reader.GetInt32(2);
@@ -144,10 +148,15 @@ public class PostgresModelStore : PostgresStoreBase, IModelStore
         var weightsOid = reader.GetFieldValue<uint>(6);
         var optimizerOid = reader.GetFieldValue<uint>(7);
 
+        // Close the reader before reading large objects
         await reader.CloseAsync();
 
-        var weights = await ReadLargeObjectAsync(connection, weightsOid, cancellationToken);
-        var optimizer = await ReadLargeObjectAsync(connection, optimizerOid, cancellationToken);
+        // Both reads happen inside the same transaction
+        var weights = await ReadLargeObjectAsync(connection, weightsOid, transaction, cancellationToken);
+        var optimizer = await ReadLargeObjectAsync(connection, optimizerOid, transaction, cancellationToken);
+
+        // Commit everything atomically
+        await transaction.CommitAsync(cancellationToken);
 
         return new ModelCheckpoint
         {
@@ -171,7 +180,7 @@ public class PostgresModelStore : PostgresStoreBase, IModelStore
     /// <returns></returns>
     public async Task DeleteAsync(Guid modelId, CancellationToken cancellationToken = default)
     {
-        var connection = await GetConnectionAsync(cancellationToken);
+        await using var connection = await GetConnectionAsync(cancellationToken);
 
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
@@ -217,7 +226,7 @@ public class PostgresModelStore : PostgresStoreBase, IModelStore
     /// <returns></returns>
     public async Task<List<Guid>> ListAsync(string? tagKey = null, string? tagValue = null, CancellationToken cancellationToken = default)
     {
-        var connection = await GetConnectionAsync(cancellationToken);
+        await using var connection = await GetConnectionAsync(cancellationToken);
         string sqlQuery;
         NpgsqlCommand command;
 
@@ -310,12 +319,12 @@ public class PostgresModelStore : PostgresStoreBase, IModelStore
     }
 
     private static async Task<byte[]> ReadLargeObjectAsync(
-        NpgsqlConnection connection,
-        uint objectId,
-        CancellationToken cancellationToken)
+    NpgsqlConnection connection,
+    uint objectId,
+    NpgsqlTransaction transaction,   // required – caller manages it
+    CancellationToken cancellationToken = default)
     {
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-
+        // All commands use the provided transaction – do NOT commit or dispose it here.
         await using var openCommand = new NpgsqlCommand(PostgresLargeObjectQueries.OpenRead, connection, transaction);
         openCommand.Parameters.AddWithValue("@oid", objectId).NpgsqlDbType = NpgsqlDbType.Oid;
         var fileDescriptor = Convert.ToInt32(await openCommand.ExecuteScalarAsync(cancellationToken));
@@ -326,6 +335,7 @@ public class PostgresModelStore : PostgresStoreBase, IModelStore
 
         await using var seekCommand = new NpgsqlCommand(PostgresLargeObjectQueries.SeekStart, connection, transaction);
         seekCommand.Parameters.AddWithValue("@fd", fileDescriptor).NpgsqlDbType = NpgsqlDbType.Integer;
+
         await seekCommand.ExecuteScalarAsync(cancellationToken);
 
         using var memoryStream = new MemoryStream((int)size);
@@ -337,6 +347,7 @@ public class PostgresModelStore : PostgresStoreBase, IModelStore
             var bytesToRead = (int)Math.Min(chunkSize, size - totalRead);
 
             await using var readCommand = new NpgsqlCommand(PostgresLargeObjectQueries.ReadChunk, connection, transaction);
+
             readCommand.Parameters.AddWithValue("@fd", fileDescriptor).NpgsqlDbType = NpgsqlDbType.Integer;
             readCommand.Parameters.AddWithValue("@length", bytesToRead).NpgsqlDbType = NpgsqlDbType.Integer;
 
@@ -345,12 +356,12 @@ public class PostgresModelStore : PostgresStoreBase, IModelStore
             if (result is byte[] dataChunk)
             {
                 await memoryStream.WriteAsync(dataChunk, 0, dataChunk.Length, cancellationToken);
+
                 totalRead += dataChunk.Length;
             }
+
             else break;
         }
-
-        await transaction.CommitAsync(cancellationToken);
 
         return memoryStream.ToArray();
     }

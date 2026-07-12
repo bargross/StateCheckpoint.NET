@@ -1,7 +1,7 @@
 ﻿using StateCheckpoint.NET.Models;
 using StateCheckpoint.NET.Settings;
 
-namespace StateCheckpoint.NET.Stores.FileSystem;
+namespace StateCheckpoint.NET.Stores;
 
 public class FileSystemModelStore : IModelStore
 {
@@ -112,10 +112,25 @@ public class FileSystemModelStore : IModelStore
     public Task DeleteAsync(Guid modelId, CancellationToken cancellationToken = default)
         => FileSystemHelper.DeleteAsync(_rootPath, modelId, cancellationToken);
 
-    public Task<List<Guid>> ListAsync(string? tagKey = null, string? tagValue = null, CancellationToken cancellationToken = default)
+    public async Task<List<Guid>> ListAsync(string? tagKey = null, string? tagValue = null, CancellationToken cancellationToken = default)
     {
-        // Tag filtering is ignored for Phase 1 FileSystem.
-        // The manager can filter in-memory if needed.
-        return FileSystemHelper.ListAsync(_rootPath, cancellationToken);
+        var allIds = await FileSystemHelper.ListAsync(_rootPath, cancellationToken);
+
+        // If no filter, return all
+        if (string.IsNullOrWhiteSpace(tagKey) || string.IsNullOrWhiteSpace(tagValue))
+            return allIds;
+
+        // Filter in-memory by loading each manifest
+        var filtered = new List<Guid>();
+        foreach (var id in allIds)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var manifest = await FileSystemHelper.LoadManifestOnlyAsync<ModelManifest>(_rootPath, id, "manifest.json", cancellationToken);
+            if (manifest != null && manifest.Tags != null && manifest.Tags.TryGetValue(tagKey, out var val) && val == tagValue)
+                filtered.Add(id);
+        }
+
+        return filtered;
     }
 }

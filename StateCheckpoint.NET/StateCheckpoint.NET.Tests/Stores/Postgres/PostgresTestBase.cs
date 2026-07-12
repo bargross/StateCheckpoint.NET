@@ -1,4 +1,4 @@
-﻿using StateCheckpoint.NET.Stores.Postgres;
+﻿using StateCheckpoint.NET.Stores;
 using Npgsql;
 
 namespace StateCheckpoint.NET.Tests.Stores.Postgres;

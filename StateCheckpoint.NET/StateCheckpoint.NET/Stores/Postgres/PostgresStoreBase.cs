@@ -1,6 +1,6 @@
 ﻿using Npgsql;
 
-namespace StateCheckpoint.NET.Stores.Postgres;
+namespace StateCheckpoint.NET.Stores;
 
 /// <summary>
 /// Abstract base class for PostgreSQL stores.

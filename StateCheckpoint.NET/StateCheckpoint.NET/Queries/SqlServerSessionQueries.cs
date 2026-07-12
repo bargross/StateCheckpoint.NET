@@ -1,4 +1,6 @@
-﻿namespace StateCheckpoint.NET.Stores;
+﻿using System.Security.Cryptography;
+
+namespace StateCheckpoint.NET.Stores;
 
 /// <summary>
 /// SQL Server queries specific to the Inference (Session) domain.
@@ -54,5 +56,6 @@ internal static class SqlServerSessionQueries
 
     // --- Listing ---
     public const string ListAllSessionIds = "SELECT SessionId FROM InferenceSessions;";
-    public const string ListSessionIdsByTag = "SELECT SessionId FROM InferenceSessions WHERE Tags LIKE @TagPattern;";
+    //public const string ListSessionIdsByTag = "SELECT SessionId FROM InferenceSessions WHERE Tags LIKE @TagPattern;";
+    public const string ListSessionIdsByTag = "SELECT SessionId FROM InferenceSessions WHERE JSON_VALUE(Tags, '$.{tagKey}') = @TagValue";
 }

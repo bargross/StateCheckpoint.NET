@@ -84,5 +84,6 @@ internal static class SqlServerTrainingQueries
 
     // --- Listing ---
     public const string ListAllModelIds = "SELECT ModelId FROM ModelManifests;";
-    public const string ListModelIdsByTag = "SELECT ModelId FROM ModelManifests WHERE Tags LIKE @TagPattern;";
+    //public const string ListModelIdsByTag = "SELECT ModelId FROM ModelManifests WHERE Tags LIKE @TagPattern;";
+    public const string ListModelIdsByTag = "SELECT ModelId FROM ModelManifests WHERE JSON_VALUE(Tags, '$.{tagKey}') = @TagValue";
 }
