@@ -31,6 +31,8 @@ Patch release fixing all critical correctness bugs identified in the initial rel
 
 - PostgresModelStore and PostgresSessionStore connections not disposed asynchronously — four call sites in PostgresModelStore and five in PostgresSessionStore used using var connection (synchronous IDisposable) instead of await using var connection (IAsyncDisposable). NpgsqlConnection implements IAsyncDisposable and disposing it synchronously blocks the thread pool while the connection is returned. All call sites now use await using.
 
+- Collapsed StateCheckpoint.NET.Stores.Postgres and StateCheckpoint.NET.Stores.Mysql (named incorrectly, sqlServer) into StateCheckpoint.NET.Stores (breaking change). 
+
 ## [1.0.0] - 2025-06-25
 
 ### Added
