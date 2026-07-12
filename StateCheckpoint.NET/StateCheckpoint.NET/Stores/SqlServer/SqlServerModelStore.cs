@@ -2,7 +2,7 @@
 using Microsoft.Data.SqlClient;
 using System.Text.Json;
 
-namespace StateCheckpoint.NET.Stores.Mysql;
+namespace StateCheckpoint.NET.Stores;
 
 public class SqlServerModelStore : SqlServerStoreBase, IModelStore
 {
@@ -18,7 +18,7 @@ public class SqlServerModelStore : SqlServerStoreBase, IModelStore
     /// <returns></returns>
     public async Task EnsureSchemaAsync(CancellationToken cancellationToken = default)
     {
-        var connection = await GetConnectionAsync(cancellationToken);
+        using var connection = await GetConnectionAsync(cancellationToken);
 
         await using var command = new SqlCommand(SqlServerTrainingQueries.EnsureModelSchema, connection);
 
@@ -33,7 +33,7 @@ public class SqlServerModelStore : SqlServerStoreBase, IModelStore
     /// <returns>id for model checkpoint</returns>
     public async Task SaveAsync(ModelCheckpoint checkpoint, CancellationToken cancellationToken = default)
     {
-        var connection = await GetConnectionAsync(cancellationToken);
+        using var connection = await GetConnectionAsync(cancellationToken);
         await using var tx = await connection.BeginTransactionAsync(cancellationToken);
 
         await using var command = new SqlCommand(SqlServerTrainingQueries.UpsertModelManifest, connection, tx as SqlTransaction);
@@ -67,7 +67,7 @@ public class SqlServerModelStore : SqlServerStoreBase, IModelStore
     /// <returns></returns>
     public async Task<ModelCheckpoint?> LoadAsync(Guid modelId, CancellationToken cancellationToken = default)
     {
-        var connection = await GetConnectionAsync(cancellationToken);
+        using var connection = await GetConnectionAsync(cancellationToken);
 
         await using var command = new SqlCommand(SqlServerTrainingQueries.SelectFullModelManifest, connection);
 
@@ -108,7 +108,7 @@ public class SqlServerModelStore : SqlServerStoreBase, IModelStore
     /// <returns></returns>
     public async Task DeleteAsync(Guid modelId, CancellationToken cancellationToken = default)
     {
-        var connection = await GetConnectionAsync(cancellationToken);
+        using var connection = await GetConnectionAsync(cancellationToken);
 
         await using var command = new SqlCommand(SqlServerTrainingQueries.DeleteModelManifest, connection);
 
@@ -126,7 +126,7 @@ public class SqlServerModelStore : SqlServerStoreBase, IModelStore
     /// <returns></returns>
     public async Task<List<Guid>> ListAsync(string? tagKey = null, string? tagValue = null, CancellationToken cancellationToken = default)
     {
-        var connection = await GetConnectionAsync(cancellationToken);
+        using var connection = await GetConnectionAsync(cancellationToken);
 
         string sql;
         SqlCommand command;
@@ -138,9 +138,11 @@ public class SqlServerModelStore : SqlServerStoreBase, IModelStore
         }
         else
         {
-            sql = SqlServerTrainingQueries.ListModelIdsByTag;
+            sql = SqlServerTrainingQueries.ListModelIdsByTag.Replace("{tagKey}", tagKey);
+
             command = new SqlCommand(sql, connection);
-            command.Parameters.AddWithValue("@TagPattern", $"%\"{tagKey}\":\"{tagValue}\"%");
+
+            command.Parameters.AddWithValue("@TagValue", tagValue);
         }
 
         await using (command)

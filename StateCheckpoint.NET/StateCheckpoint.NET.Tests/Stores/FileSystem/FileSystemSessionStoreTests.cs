@@ -1,6 +1,6 @@
 ﻿using StateCheckpoint.NET.Models;
 using StateCheckpoint.NET.Settings;
-using StateCheckpoint.NET.Stores.FileSystem;
+using StateCheckpoint.NET.Stores;
 using FluentAssertions;
 
 namespace StateCheckpoint.NET.Tests.Stores.FileSystem;
@@ -30,7 +30,7 @@ public class FileSystemSessionStoreTests : IDisposable
     }
 
     // Helper to create a test session
-    private SessionCheckpoint CreateTestSession(Guid? id = null)
+    private SessionCheckpoint CreateTestSession(Guid? id = null, Dictionary<string, string>? tags = null)
     {
         return new SessionCheckpoint
         {
@@ -40,7 +40,7 @@ public class FileSystemSessionStoreTests : IDisposable
             ModelFingerprint = "test-model-v1",
             SamplingConfig = new SamplingData { Temperature = 0.9f, TopP = 0.85f },
             LastUpdated = DateTime.UtcNow,
-            Tags = new Dictionary<string, string> { { "env", "test" } }
+            Tags = tags ?? new Dictionary<string, string> { { "env", "test" } }
         };
     }
 
@@ -237,18 +237,22 @@ public class FileSystemSessionStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task ListAsync_WithTagFilter_ShouldIgnoreTagsAndReturnAll()
+    public async Task ListAsync_WithTagFilter_ShouldFilterByTag()
     {
         // Arrange
         var store = new FileSystemSessionStore(_testRoot, _defaultOptions);
-        var session = CreateTestSession();
-        await store.SaveAsync(session);
+        var session1 = CreateTestSession(tags: new Dictionary<string, string> { { "env", "prod" } });
+        var session2 = CreateTestSession(tags: new Dictionary<string, string> { { "env", "dev" } });
+
+        await store.SaveAsync(session1);
+        await store.SaveAsync(session2);
 
         // Act
-        var ids = await store.ListAsync("some", "filter");
+        var ids = await store.ListAsync("env", "prod");
 
-        // Assert - FileSystem store ignores tag filtering, so it returns all.
-        ids.Should().Contain(session.SessionId);
+        // Assert
         ids.Count.Should().Be(1);
+        ids.Should().Contain(session1.SessionId);
+        ids.Should().NotContain(session2.SessionId);
     }
 }

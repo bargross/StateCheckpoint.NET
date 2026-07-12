@@ -14,7 +14,7 @@ public class TokenizerData
 
     // 4. BPE Merge Rules (only relevant for BPE/ByteLevelBPE).
     //    Order matters! The order of merges defines the tokenization priority.
-    public List<(string Left, string Right)>? MergeRules { get; set; }
+    public List<MergeRule>? MergeRules { get; set; }
 
     // 5. Optional: Unigram log-probabilities (only used for Unigram tokenizers).
     //    Make it nullable to keep the JSON small for BPE users.

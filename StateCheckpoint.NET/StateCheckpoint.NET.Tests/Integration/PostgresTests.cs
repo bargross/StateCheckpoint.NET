@@ -1,5 +1,5 @@
 ﻿using StateCheckpoint.NET.Manager;
-using StateCheckpoint.NET.Stores.Postgres;
+using StateCheckpoint.NET.Stores;
 using Npgsql;
 using Testcontainers.PostgreSql;
 

@@ -1,5 +1,4 @@
 ﻿using StateCheckpoint.NET.Models;
-using StateCheckpoint.NET.Stores.Mysql;
 using Microsoft.Data.SqlClient;
 using System.Text.Json;
 
@@ -19,7 +18,7 @@ public class SqlServerSessionStore : SqlServerStoreBase, ISessionStore
     /// <returns></returns>
     public async Task EnsureSchemaAsync(CancellationToken cancellationToken = default)
     {
-        var connection = await GetConnectionAsync(cancellationToken);
+        using var connection = await GetConnectionAsync(cancellationToken);
 
         await using var command = new SqlCommand(SqlServerSessionQueries.EnsureSessionSchema, connection);
 
@@ -34,7 +33,7 @@ public class SqlServerSessionStore : SqlServerStoreBase, ISessionStore
     /// <returns>Session id created for the given session</returns>
     public async Task SaveAsync(SessionCheckpoint session, CancellationToken cancellationToken = default)
     {
-        var connection = await GetConnectionAsync(cancellationToken);
+        using var connection = await GetConnectionAsync(cancellationToken);
 
         await using var tx = await connection.BeginTransactionAsync(cancellationToken);
 
@@ -63,7 +62,7 @@ public class SqlServerSessionStore : SqlServerStoreBase, ISessionStore
     /// <returns></returns>
     public async Task<SessionCheckpoint?> LoadAsync(Guid sessionId, CancellationToken cancellationToken = default)
     {
-        var connection = await GetConnectionAsync(cancellationToken);
+        using var connection = await GetConnectionAsync(cancellationToken);
 
         await using var command = new SqlCommand(SqlServerSessionQueries.SelectInferenceSession, connection);
 
@@ -93,7 +92,7 @@ public class SqlServerSessionStore : SqlServerStoreBase, ISessionStore
     /// <returns></returns>
     public async Task DeleteAsync(Guid sessionId, CancellationToken cancellationToken = default)
     {
-        var connection = await GetConnectionAsync(cancellationToken);
+        using var connection = await GetConnectionAsync(cancellationToken);
 
         await using var command = new SqlCommand(SqlServerSessionQueries.DeleteInferenceSession, connection);
 
@@ -111,7 +110,7 @@ public class SqlServerSessionStore : SqlServerStoreBase, ISessionStore
     /// <returns></returns>
     public async Task<List<Guid>> ListAsync(string? tagKey = null, string? tagValue = null, CancellationToken cancellationToken = default)
     {
-        var connection = await GetConnectionAsync(cancellationToken);
+        using var connection = await GetConnectionAsync(cancellationToken);
 
         string sql;
         SqlCommand command;
@@ -123,9 +122,11 @@ public class SqlServerSessionStore : SqlServerStoreBase, ISessionStore
         }
         else
         {
-            sql = SqlServerSessionQueries.ListSessionIdsByTag;
+            sql = SqlServerSessionQueries.ListSessionIdsByTag.Replace("{tagKey}", tagKey);
+
             command = new SqlCommand(sql, connection);
-            command.Parameters.AddWithValue("@TagPattern", $"%\"{tagKey}\":\"{tagValue}\"%");
+
+            command.Parameters.AddWithValue("@TagValue", tagValue);
         }
 
         await using (command)

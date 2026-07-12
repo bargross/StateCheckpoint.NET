@@ -13,7 +13,7 @@ public class BackgroundSaverTests
 
         // Assert
         var tcs = new TaskCompletionSource<bool>();
-        saver.Enqueue(async (ct) =>
+        await saver.EnqueueAsync(async (ct) =>
         {
             await Task.Delay(10, ct);
             tcs.SetResult(true);
@@ -32,7 +32,7 @@ public class BackgroundSaverTests
         var invoked = false;
 
         // Act
-        saver.Enqueue(async (ct) =>
+        await saver.EnqueueAsync(async (ct) =>
         {
             await Task.CompletedTask;
             invoked = true;
@@ -53,10 +53,10 @@ public class BackgroundSaverTests
         await saver.DisposeAsync();
 
         // Act
-        Action act = () => saver.Enqueue(async (ct) => await Task.CompletedTask);
+        var act = async () => await saver.EnqueueAsync(async (ct) => await Task.CompletedTask);
 
         // Assert
-        act.Should().Throw<ObjectDisposedException>();
+        await act.Should().ThrowAsync<InvalidOperationException>();
     }
 
     [Fact]
@@ -67,7 +67,7 @@ public class BackgroundSaverTests
         using var holdEvent = new ManualResetEventSlim(false);
 
         // 1st enqueue – worker picks it up and blocks synchronously.
-        saver.Enqueue(async (ct) =>
+        await saver.EnqueueAsync(async (ct) =>
         {
             holdEvent.Wait(ct);  // Blocks the worker thread until we signal.
             await Task.CompletedTask;
@@ -77,10 +77,10 @@ public class BackgroundSaverTests
         await Task.Delay(100);
 
         // 2nd enqueue – worker is blocked, so this fills the channel (capacity = 1).
-        saver.Enqueue(async (ct) => await Task.CompletedTask);
+        await saver.EnqueueAsync(async (ct) => await Task.CompletedTask);
 
         // 3rd enqueue – channel is full, so this MUST block.
-        var enqueueTask = Task.Run(() => saver.Enqueue(async (ct) => await Task.CompletedTask));
+        var enqueueTask = Task.Run(async () => await saver.EnqueueAsync(async (ct) => await Task.CompletedTask));
 
         // Verify the third enqueue is blocked.
         await Task.Delay(100);
@@ -104,7 +104,7 @@ public class BackgroundSaverTests
 
         // Act
         var expectedException = new InvalidOperationException("Test error");
-        saver.Enqueue(async (ct) =>
+        await saver.EnqueueAsync(async (ct) =>
         {
             await Task.CompletedTask;
             throw expectedException;
@@ -127,7 +127,7 @@ public class BackgroundSaverTests
         // Act & Assert - should not throw
         var act = async () =>
         {
-            saver.Enqueue(async (ct) =>
+            await saver.EnqueueAsync(async (ct) =>
             {
                 await Task.CompletedTask;
                 throw new InvalidOperationException("Test error");
@@ -146,7 +146,7 @@ public class BackgroundSaverTests
         var saver = new BackgroundSaver<object>(capacity: 2);
         var processed = false;
 
-        saver.Enqueue(async (ct) =>
+        await saver.EnqueueAsync(async (ct) =>
         {
             await Task.Delay(200, ct);
             processed = true;
@@ -166,7 +166,7 @@ public class BackgroundSaverTests
         var saver = new BackgroundSaver<object>(capacity: 2);
         var tcs = new TaskCompletionSource<bool>();
 
-        saver.Enqueue(async (ct) =>
+        await saver.EnqueueAsync(async (ct) =>
         {
             await Task.Delay(50, ct);
             tcs.SetResult(true);
@@ -188,7 +188,7 @@ public class BackgroundSaverTests
         var saver = new BackgroundSaver<object>(capacity: 1);
 
         // Act
-        saver.Enqueue(async (ct) =>
+        await saver.EnqueueAsync(async (ct) =>
         {
             await Task.Delay(1000, ct);
         });
@@ -196,9 +196,9 @@ public class BackgroundSaverTests
         await saver.DisposeAsync();
 
         // Assert
-        Action act = () => saver.Enqueue(async (ct) => await Task.CompletedTask);
+        Func<Task> act = async () => await saver.EnqueueAsync(async (ct) => await Task.CompletedTask);
 
-        act.Should().Throw<ObjectDisposedException>();
+        await act.Should().ThrowAsync<ObjectDisposedException>();
     }
 }
 

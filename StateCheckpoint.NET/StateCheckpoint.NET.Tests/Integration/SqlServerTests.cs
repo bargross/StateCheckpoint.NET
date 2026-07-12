@@ -1,6 +1,5 @@
 ﻿using StateCheckpoint.NET.Manager;
 using StateCheckpoint.NET.Stores;
-using StateCheckpoint.NET.Stores.Mysql;
 using Microsoft.Data.SqlClient;
 using Testcontainers.MsSql;
 

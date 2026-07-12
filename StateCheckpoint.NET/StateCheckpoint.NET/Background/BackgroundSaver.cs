@@ -35,18 +35,17 @@ internal sealed class BackgroundSaver<T> : IAsyncDisposable
     /// Enqueues a save operation. Returns immediately.
     /// The operation will be executed on the background thread.
     /// </summary>
-    public void Enqueue(Func<CancellationToken, Task> saveOperation, CancellationToken cancellationToken = default)
+    public async ValueTask EnqueueAsync(Func<CancellationToken, Task> saveOperation, CancellationToken cancellationToken = default)
     {
-        if (_disposed)
-            throw new ObjectDisposedException(nameof(BackgroundSaver<T>));
+        if (_disposed) throw new ObjectDisposedException(nameof(BackgroundSaver<T>));
 
         try
         {
-            _channel.Writer.WriteAsync(saveOperation, cancellationToken).AsTask().GetAwaiter().GetResult();
+            await _channel.Writer.WriteAsync(saveOperation, cancellationToken);
         }
-        catch (OperationCanceledException)
-        {
-            throw;
+        catch (OperationCanceledException) 
+        { 
+            throw; 
         }
         catch (ChannelClosedException)
         {

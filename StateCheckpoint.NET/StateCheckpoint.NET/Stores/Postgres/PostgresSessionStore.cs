@@ -2,7 +2,7 @@
 using Npgsql;
 using StateCheckpoint.NET.Models;
 
-namespace StateCheckpoint.NET.Stores.Postgres;
+namespace StateCheckpoint.NET.Stores;
 
 public class PostgresSessionStore : PostgresStoreBase, ISessionStore
 {
@@ -19,7 +19,7 @@ public class PostgresSessionStore : PostgresStoreBase, ISessionStore
     /// <returns></returns>
     public async Task EnsureSchemaAsync(CancellationToken cancellationToken = default)
     {
-        var connection = await GetConnectionAsync(cancellationToken);
+        using var connection = await GetConnectionAsync(cancellationToken);
 
         await using var command = new NpgsqlCommand(PostgresSessionQueries.EnsureSessionSchema, connection);
 
@@ -35,7 +35,7 @@ public class PostgresSessionStore : PostgresStoreBase, ISessionStore
     /// <returns>Session id created for the given session</returns>
     public async Task SaveAsync(SessionCheckpoint session, CancellationToken cancellationToken = default)
     {
-        var connection = await GetConnectionAsync(cancellationToken);
+        using var connection = await GetConnectionAsync(cancellationToken);
 
         await using var command = new NpgsqlCommand(PostgresSessionQueries.UpsertInferenceSession, connection);
 
@@ -58,7 +58,7 @@ public class PostgresSessionStore : PostgresStoreBase, ISessionStore
     /// <returns></returns>
     public async Task<SessionCheckpoint?> LoadAsync(Guid sessionId, CancellationToken cancellationToken = default)
     {
-        var connection = await GetConnectionAsync(cancellationToken);
+        using var connection = await GetConnectionAsync(cancellationToken);
 
         await using var command = new NpgsqlCommand(PostgresSessionQueries.SelectInferenceSession, connection);
         command.Parameters.AddWithValue("@id", sessionId);
@@ -86,7 +86,7 @@ public class PostgresSessionStore : PostgresStoreBase, ISessionStore
     /// <returns></returns>
     public async Task DeleteAsync(Guid sessionId, CancellationToken cancellationToken = default)
     {
-        var connection = await GetConnectionAsync(cancellationToken);
+        using var connection = await GetConnectionAsync(cancellationToken);
 
         await using var command = new NpgsqlCommand(PostgresSessionQueries.DeleteInferenceSession, connection);
         command.Parameters.AddWithValue("@id", sessionId);
@@ -103,7 +103,7 @@ public class PostgresSessionStore : PostgresStoreBase, ISessionStore
     /// <returns></returns>
     public async Task<List<Guid>> ListAsync(string? tagKey = null, string? tagValue = null, CancellationToken cancellationToken = default)
     {
-        var connection = await GetConnectionAsync(cancellationToken);
+        using var connection = await GetConnectionAsync(cancellationToken);
         string sqlQuery;
         NpgsqlCommand command;
 

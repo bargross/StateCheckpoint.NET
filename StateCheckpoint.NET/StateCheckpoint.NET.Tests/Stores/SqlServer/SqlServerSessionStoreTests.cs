@@ -2,7 +2,7 @@
 using StateCheckpoint.NET.Tests.Stores.SqlServer;
 using FluentAssertions;
 
-namespace StateCheckpoint.NET.Tests.Stores.Mysql;
+namespace StateCheckpoint.NET.Tests.Stores.SqlServer;
 
 [Collection("NonParallel")]
 public class SqlServerSessionStoreTests : SqlServerTestBase

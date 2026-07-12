@@ -1,6 +1,7 @@
 ﻿using Microsoft.Data.SqlClient;
+using System.Data;
 
-namespace StateCheckpoint.NET.Stores.Mysql;
+namespace StateCheckpoint.NET.Stores;
 
 /// <summary>
 /// Abstract base class for SQL Server stores.
@@ -11,6 +12,7 @@ public abstract class SqlServerStoreBase : IAsyncDisposable
     private readonly string _connectionString = string.Empty;
     private SqlConnection? _connection;
     private readonly bool _ownsConnection;
+    private readonly SemaphoreSlim _connectionLock = new(1, 1);
 
     /// <summary>
     /// Initializes the store with a connection string.
@@ -37,20 +39,30 @@ public abstract class SqlServerStoreBase : IAsyncDisposable
     /// </summary>
     protected async Task<SqlConnection> GetConnectionAsync(CancellationToken ct = default)
     {
-        if (_connection == null || _connection.State != System.Data.ConnectionState.Open)
+        if (!_ownsConnection)
         {
-            if (_connection == null && _ownsConnection)
-            {
-                _connection = new SqlConnection(_connectionString);
-            }
+            // External connection – ensure thread‑safe access
+            await _connectionLock.WaitAsync(ct);
 
-            if (_connection != null && _connection.State != System.Data.ConnectionState.Open)
+            try
             {
-                await _connection.OpenAsync(ct);
+                if (_connection!.State != ConnectionState.Open)
+                    await _connection.OpenAsync(ct);
+
+                return _connection;
+            }
+            finally
+            {
+                _connectionLock.Release();
             }
         }
 
-        return _connection!;
+        // Owned connection – create a new one per call
+        var connection = new SqlConnection(_connectionString!);
+
+        await connection.OpenAsync(ct);
+
+        return connection;
     }
 
     /// <summary>
