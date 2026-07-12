@@ -20,7 +20,7 @@ public class PostgresModelStore : PostgresStoreBase, IModelStore
       /// <returns></returns>
     public async Task EnsureSchemaAsync(CancellationToken CancellationToken = default)
     {
-        using var connection = await GetConnectionAsync(CancellationToken);
+        await using var connection = await GetConnectionAsync(CancellationToken);
 
         await using var command = new NpgsqlCommand(PostgresTrainingQueries.EnsureModelSchema, connection);
 
@@ -35,7 +35,7 @@ public class PostgresModelStore : PostgresStoreBase, IModelStore
     /// <returns>id for model checkpoint</returns>
     public async Task SaveAsync(ModelCheckpoint checkpoint, CancellationToken cancellationToken = default)
     {
-        using var connection = await GetConnectionAsync(cancellationToken);
+        await using var connection = await GetConnectionAsync(cancellationToken);
 
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
@@ -180,7 +180,7 @@ public class PostgresModelStore : PostgresStoreBase, IModelStore
     /// <returns></returns>
     public async Task DeleteAsync(Guid modelId, CancellationToken cancellationToken = default)
     {
-        using var connection = await GetConnectionAsync(cancellationToken);
+        await using var connection = await GetConnectionAsync(cancellationToken);
 
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
@@ -226,7 +226,7 @@ public class PostgresModelStore : PostgresStoreBase, IModelStore
     /// <returns></returns>
     public async Task<List<Guid>> ListAsync(string? tagKey = null, string? tagValue = null, CancellationToken cancellationToken = default)
     {
-        using var connection = await GetConnectionAsync(cancellationToken);
+        await using var connection = await GetConnectionAsync(cancellationToken);
         string sqlQuery;
         NpgsqlCommand command;
 
