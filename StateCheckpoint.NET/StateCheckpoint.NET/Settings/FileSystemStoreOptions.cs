@@ -3,6 +3,11 @@
 public class FileSystemStoreOptions
 {
     /// <summary>
+    /// 
+    /// </summary>
+    public string? RootPath { get; set; } = "./checkpoints";
+
+    /// <summary>
     /// If true, the library will create the root directory if it does not exist.
     /// If false, the library will throw an exception if the directory is missing.
     /// Default: true.

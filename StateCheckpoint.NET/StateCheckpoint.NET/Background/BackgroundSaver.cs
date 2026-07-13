@@ -1,6 +1,6 @@
 ﻿using System.Threading.Channels;
 
-namespace StateCheckpoint.NET.Manager;
+namespace StateCheckpoint.NET;
 
 /// <summary>
 /// Internal background queue for fire-and-forget save operations.

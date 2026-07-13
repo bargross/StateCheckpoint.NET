@@ -1,12 +1,12 @@
 ﻿using Npgsql;
 
-namespace StateCheckpoint.NET.Stores;
+namespace StateCheckpoint.NET;
 
 /// <summary>
 /// Abstract base class for PostgreSQL stores.
 /// Supports connection string OR an externally managed NpgsqlDataSource.
 /// </summary>
-public abstract class PostgresStoreBase : IAsyncDisposable
+internal abstract class PostgresStoreBase : IAsyncDisposable
 {
     private readonly NpgsqlDataSource _dataSource;
     private readonly bool _ownsDataSource;

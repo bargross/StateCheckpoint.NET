@@ -1,4 +1,4 @@
-﻿namespace StateCheckpoint.NET.Stores;
+﻿namespace StateCheckpoint.NET;
 
 /// <summary>
 /// Low-level PostgreSQL Large Object SQL functions.

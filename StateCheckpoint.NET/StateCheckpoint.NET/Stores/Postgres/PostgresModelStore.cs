@@ -1,11 +1,13 @@
-﻿using StateCheckpoint.NET.Models;
-using Npgsql;
+﻿using Npgsql;
 using NpgsqlTypes;
+using StateCheckpoint.NET.Models;
+using System.Runtime.CompilerServices;
+using System.Text;
 using System.Text.Json;
 
-namespace StateCheckpoint.NET.Stores;
+namespace StateCheckpoint.NET;
 
-public class PostgresModelStore : PostgresStoreBase, IModelStore
+internal class PostgresModelStore : PostgresStoreBase, IDbModelStore
 {
     private static readonly JsonSerializerOptions _jsonOpts = new() { WriteIndented = false };
 
@@ -253,6 +255,68 @@ public class PostgresModelStore : PostgresStoreBase, IModelStore
         return modelIds;
     }
 
+    public async Task<List<CheckpointSummary>> QueryAsync(CheckpointQuery query, CancellationToken ct = default)
+    {
+        await using var connection = await GetConnectionAsync(ct);
+        var (sql, parameters) = BuildQuerySql(query, includeOrderBy: true, includeLimit: true);
+
+        await using var command = new NpgsqlCommand(sql, connection);
+        command.Parameters.AddRange(parameters.ToArray());
+
+        await using var reader = await command.ExecuteReaderAsync(ct);
+
+        var results = new List<CheckpointSummary>();
+        while (await reader.ReadAsync(ct))
+        {
+            results.Add(new CheckpointSummary
+            {
+                ModelId = reader.GetGuid(0),
+                CurrentEpoch = reader.GetInt32(1),
+                LastTrainingLoss = (float)reader.GetDouble(2),
+                CreatedAt = reader.GetDateTime(3),
+                Tags = JsonSerializer.Deserialize<Dictionary<string, string>>(reader.GetString(4)) ?? new()
+            });
+        }
+
+        return results;
+    }
+
+    public async IAsyncEnumerable<CheckpointSummary> QueryStreamAsync(
+        CheckpointQuery query,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        await using var connection = await GetConnectionAsync(ct);
+        var (sql, parameters) = BuildQuerySql(query, includeOrderBy: true, includeLimit: true);
+
+        await using var command = new NpgsqlCommand(sql, connection);
+        command.Parameters.AddRange(parameters.ToArray());
+
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            ct.ThrowIfCancellationRequested();
+            yield return new CheckpointSummary
+            {
+                ModelId = reader.GetGuid(0),
+                CurrentEpoch = reader.GetInt32(1),
+                LastTrainingLoss = (float)reader.GetDouble(2),
+                CreatedAt = reader.GetDateTime(3),
+                Tags = JsonSerializer.Deserialize<Dictionary<string, string>>(reader.GetString(4)) ?? new()
+            };
+        }
+    }
+
+    public async Task DeleteManyAsync(IEnumerable<Guid> modelIds, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await GetConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        foreach (var id in modelIds)
+            await DeleteAsync(id, cancellationToken);
+
+        await transaction.CommitAsync(cancellationToken);
+    }
+
     //--------- private methods -----------------------------------
 
     // --- Large Object Helpers (Use PostgresLargeObjectQueries) ---
@@ -364,5 +428,83 @@ public class PostgresModelStore : PostgresStoreBase, IModelStore
         }
 
         return memoryStream.ToArray();
+    }
+
+    // Helper to build SQL and parameters for queries
+    private (string Sql, List<NpgsqlParameter> Parameters) BuildQuerySql(CheckpointQuery query, bool includeOrderBy = true, bool includeLimit = true)
+    {
+        var sql = new StringBuilder(@"
+        SELECT m.model_id, m.epoch, m.loss, m.created_at, m.tags
+        FROM model_manifests m
+        JOIN model_blobs b ON m.model_id = b.model_id
+        WHERE 1=1
+    ");
+
+        var parameters = new List<NpgsqlParameter>();
+        int paramIndex = 0;
+
+        if (query.MinEpoch.HasValue)
+        {
+            sql.Append($" AND m.epoch >= @p{paramIndex}");
+            parameters.Add(new NpgsqlParameter($"@p{paramIndex}", query.MinEpoch.Value));
+            paramIndex++;
+        }
+        if (query.MaxEpoch.HasValue)
+        {
+            sql.Append($" AND m.epoch <= @p{paramIndex}");
+            parameters.Add(new NpgsqlParameter($"@p{paramIndex}", query.MaxEpoch.Value));
+            paramIndex++;
+        }
+        if (query.MinLoss.HasValue)
+        {
+            sql.Append($" AND m.loss >= @p{paramIndex}");
+            parameters.Add(new NpgsqlParameter($"@p{paramIndex}", query.MinLoss.Value));
+            paramIndex++;
+        }
+        if (query.MaxLoss.HasValue)
+        {
+            sql.Append($" AND m.loss <= @p{paramIndex}");
+            parameters.Add(new NpgsqlParameter($"@p{paramIndex}", query.MaxLoss.Value));
+            paramIndex++;
+        }
+        if (query.CreatedAfter.HasValue)
+        {
+            sql.Append($" AND m.created_at >= @p{paramIndex}");
+            parameters.Add(new NpgsqlParameter($"@p{paramIndex}", query.CreatedAfter.Value));
+            paramIndex++;
+        }
+        if (query.CreatedBefore.HasValue)
+        {
+            sql.Append($" AND m.created_at <= @p{paramIndex}");
+            parameters.Add(new NpgsqlParameter($"@p{paramIndex}", query.CreatedBefore.Value));
+            paramIndex++;
+        }
+        if (query.Tags != null && query.Tags.Count > 0)
+        {
+            var json = JsonSerializer.Serialize(query.Tags);
+            sql.Append($" AND m.tags @> @p{paramIndex}::jsonb");
+            parameters.Add(new NpgsqlParameter($"@p{paramIndex}", json));
+            paramIndex++;
+        }
+
+        if (includeOrderBy)
+        {
+            var orderColumn = query.OrderBy switch
+            {
+                CheckpointSortField.CreatedAt => "m.created_at",
+                CheckpointSortField.Epoch => "m.epoch",
+                CheckpointSortField.Loss => "m.loss",
+                _ => "m.created_at"
+            };
+            sql.Append($" ORDER BY {orderColumn} {(query.Descending ? "DESC" : "ASC")}");
+        }
+
+        if (includeLimit && query.Limit.HasValue && query.Limit.Value > 0)
+        {
+            sql.Append($" LIMIT @p{paramIndex}");
+            parameters.Add(new NpgsqlParameter($"@p{paramIndex}", query.Limit.Value));
+        }
+
+        return (sql.ToString(), parameters);
     }
 }

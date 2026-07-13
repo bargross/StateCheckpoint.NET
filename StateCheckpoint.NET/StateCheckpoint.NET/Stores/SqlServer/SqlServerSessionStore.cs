@@ -1,10 +1,12 @@
-﻿using StateCheckpoint.NET.Models;
-using Microsoft.Data.SqlClient;
+﻿using Microsoft.Data.SqlClient;
+using StateCheckpoint.NET.Models;
+using System.Runtime.CompilerServices;
+using System.Text;
 using System.Text.Json;
 
-namespace StateCheckpoint.NET.Stores;
+namespace StateCheckpoint.NET;
 
-public class SqlServerSessionStore : SqlServerStoreBase, ISessionStore
+internal class SqlServerSessionStore : SqlServerStoreBase, IDbSessionStore
 {
     private static readonly JsonSerializerOptions _jsonOpts = new() { WriteIndented = false };
 
@@ -139,5 +141,108 @@ public class SqlServerSessionStore : SqlServerStoreBase, ISessionStore
 
             return list;
         }
+    }
+
+    public async Task<List<SessionSummary>> QueryAsync(SessionQuery query, CancellationToken ct = default)
+    {
+        await using var connection = await GetConnectionAsync(ct);
+        var (sql, parameters) = BuildQuerySql(query, includeOrderBy: true, includeLimit: true);
+
+        await using var command = new SqlCommand(sql, connection);
+        command.Parameters.AddRange(parameters.ToArray());
+
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        var results = new List<SessionSummary>();
+        while (await reader.ReadAsync(ct))
+        {
+            results.Add(new SessionSummary
+            {
+                SessionId = reader.GetGuid(0),
+                ModelFingerprint = reader.GetString(1),
+                LastUpdated = reader.GetDateTime(2),
+                Tags = JsonSerializer.Deserialize<Dictionary<string, string>>(reader.GetString(3)) ?? new()
+            });
+        }
+        return results;
+    }
+
+    public async IAsyncEnumerable<SessionSummary> QueryStreamAsync(
+        SessionQuery query,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        await using var connection = await GetConnectionAsync(ct);
+        var (sql, parameters) = BuildQuerySql(query, includeOrderBy: true, includeLimit: true);
+
+        await using var command = new SqlCommand(sql, connection);
+        command.Parameters.AddRange(parameters.ToArray());
+
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            ct.ThrowIfCancellationRequested();
+            yield return new SessionSummary
+            {
+                SessionId = reader.GetGuid(0),
+                ModelFingerprint = reader.GetString(1),
+                LastUpdated = reader.GetDateTime(2),
+                Tags = JsonSerializer.Deserialize<Dictionary<string, string>>(reader.GetString(3)) ?? new()
+            };
+        }
+    }
+
+    //------------ Private Methods --------------//
+
+    private (string Sql, List<SqlParameter> Parameters) BuildQuerySql(SessionQuery query, bool includeOrderBy = true, bool includeLimit = true)
+    {
+        var sql = new StringBuilder(@"
+        SELECT session_id, model_fingerprint, last_updated, tags
+        FROM InferenceSessions
+        WHERE 1=1
+    ");
+
+        var parameters = new List<SqlParameter>();
+
+        if (!string.IsNullOrEmpty(query.ModelFingerprint))
+        {
+            sql.Append(" AND model_fingerprint = @ModelFingerprint");
+            parameters.Add(new SqlParameter("@ModelFingerprint", query.ModelFingerprint));
+        }
+        if (query.UpdatedAfter.HasValue)
+        {
+            sql.Append(" AND last_updated >= @UpdatedAfter");
+            parameters.Add(new SqlParameter("@UpdatedAfter", query.UpdatedAfter.Value));
+        }
+        if (query.UpdatedBefore.HasValue)
+        {
+            sql.Append(" AND last_updated <= @UpdatedBefore");
+            parameters.Add(new SqlParameter("@UpdatedBefore", query.UpdatedBefore.Value));
+        }
+        if (query.Tags != null && query.Tags.Count > 0)
+        {
+            foreach (var pair in query.Tags)
+            {
+                var valParam = $"@tagVal_{pair.Key}";
+                sql.Append($" AND JSON_VALUE(tags, '$.{pair.Key}') = {valParam}");
+                parameters.Add(new SqlParameter(valParam, pair.Value));
+            }
+        }
+
+        if (includeOrderBy)
+        {
+            var orderColumn = query.OrderBy switch
+            {
+                SessionSortField.LastUpdated => "last_updated",
+                _ => "last_updated"
+            };
+            sql.Append($" ORDER BY {orderColumn} {(query.Descending ? "DESC" : "ASC")}");
+        }
+
+        if (includeLimit && query.Limit.HasValue && query.Limit.Value > 0)
+        {
+            sql.Append(" OFFSET 0 ROWS FETCH NEXT @Limit ROWS ONLY");
+            parameters.Add(new SqlParameter("@Limit", query.Limit.Value));
+        }
+
+        return (sql.ToString(), parameters);
     }
 }

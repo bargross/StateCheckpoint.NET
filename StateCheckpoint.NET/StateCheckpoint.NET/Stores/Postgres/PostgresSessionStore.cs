@@ -1,10 +1,12 @@
-﻿using System.Text.Json;
-using Npgsql;
+﻿using Npgsql;
 using StateCheckpoint.NET.Models;
+using System.Runtime.CompilerServices;
+using System.Text;
+using System.Text.Json;
 
-namespace StateCheckpoint.NET.Stores;
+namespace StateCheckpoint.NET;
 
-public class PostgresSessionStore : PostgresStoreBase, ISessionStore
+internal class PostgresSessionStore : PostgresStoreBase, IDbSessionStore
 {
     private static readonly JsonSerializerOptions _jsonOpts = new() { WriteIndented = false };
 
@@ -129,5 +131,111 @@ public class PostgresSessionStore : PostgresStoreBase, ISessionStore
             sessionIds.Add(dataReader.GetGuid(0));
 
         return sessionIds;
+    }
+
+    public async Task<List<SessionSummary>> QueryAsync(SessionQuery query, CancellationToken ct = default)
+    {
+        await using var connection = await GetConnectionAsync(ct);
+        var (sql, parameters) = BuildQuerySql(query, includeOrderBy: true, includeLimit: true);
+
+        await using var command = new NpgsqlCommand(sql, connection);
+        command.Parameters.AddRange(parameters.ToArray());
+
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        var results = new List<SessionSummary>();
+        while (await reader.ReadAsync(ct))
+        {
+            results.Add(new SessionSummary
+            {
+                SessionId = reader.GetGuid(0),
+                ModelFingerprint = reader.GetString(1),
+                LastUpdated = reader.GetDateTime(2),
+                Tags = JsonSerializer.Deserialize<Dictionary<string, string>>(reader.GetString(3)) ?? new()
+            });
+        }
+        return results;
+    }
+
+    // New streaming method
+    public async IAsyncEnumerable<SessionSummary> QueryStreamAsync(
+        SessionQuery query,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        await using var connection = await GetConnectionAsync(ct);
+        var (sql, parameters) = BuildQuerySql(query, includeOrderBy: true, includeLimit: true);
+
+        await using var command = new NpgsqlCommand(sql, connection);
+        command.Parameters.AddRange(parameters.ToArray());
+
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            ct.ThrowIfCancellationRequested();
+            yield return new SessionSummary
+            {
+                SessionId = reader.GetGuid(0),
+                ModelFingerprint = reader.GetString(1),
+                LastUpdated = reader.GetDateTime(2),
+                Tags = JsonSerializer.Deserialize<Dictionary<string, string>>(reader.GetString(3)) ?? new()
+            };
+        }
+    }
+
+    //---------------- Private Methods ---------------//
+
+    private (string Sql, List<NpgsqlParameter> Parameters) BuildQuerySql(SessionQuery query, bool includeOrderBy = true, bool includeLimit = true)
+    {
+        var sql = new StringBuilder(@"
+        SELECT session_id, model_fingerprint, last_updated, tags
+        FROM inference_sessions
+        WHERE 1=1
+    ");
+
+        var parameters = new List<NpgsqlParameter>();
+        int paramIndex = 0;
+
+        if (!string.IsNullOrEmpty(query.ModelFingerprint))
+        {
+            sql.Append($" AND model_fingerprint = @p{paramIndex}");
+            parameters.Add(new NpgsqlParameter($"@p{paramIndex}", query.ModelFingerprint));
+            paramIndex++;
+        }
+        if (query.UpdatedAfter.HasValue)
+        {
+            sql.Append($" AND last_updated >= @p{paramIndex}");
+            parameters.Add(new NpgsqlParameter($"@p{paramIndex}", query.UpdatedAfter.Value));
+            paramIndex++;
+        }
+        if (query.UpdatedBefore.HasValue)
+        {
+            sql.Append($" AND last_updated <= @p{paramIndex}");
+            parameters.Add(new NpgsqlParameter($"@p{paramIndex}", query.UpdatedBefore.Value));
+            paramIndex++;
+        }
+        if (query.Tags != null && query.Tags.Count > 0)
+        {
+            var json = JsonSerializer.Serialize(query.Tags);
+            sql.Append($" AND tags @> @p{paramIndex}::jsonb");
+            parameters.Add(new NpgsqlParameter($"@p{paramIndex}", json));
+            paramIndex++;
+        }
+
+        if (includeOrderBy)
+        {
+            var orderColumn = query.OrderBy switch
+            {
+                SessionSortField.LastUpdated => "last_updated",
+                _ => "last_updated"
+            };
+            sql.Append($" ORDER BY {orderColumn} {(query.Descending ? "DESC" : "ASC")}");
+        }
+
+        if (includeLimit && query.Limit.HasValue && query.Limit.Value > 0)
+        {
+            sql.Append($" LIMIT @p{paramIndex}");
+            parameters.Add(new NpgsqlParameter($"@p{paramIndex}", query.Limit.Value));
+        }
+
+        return (sql.ToString(), parameters);
     }
 }

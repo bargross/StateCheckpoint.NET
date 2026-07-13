@@ -1,64 +1,32 @@
 ﻿using StateCheckpoint.NET.Models;
 using StateCheckpoint.NET.Settings;
-using StateCheckpoint.NET.Stores;
 
-namespace StateCheckpoint.NET.Manager;
+namespace StateCheckpoint.NET;
 
 public class SessionManager : IAsyncDisposable
 {
     private readonly ISessionStore _store;
     private readonly BackgroundSaver<SessionCheckpoint>? _backgroundSaver;
-    private static string _defaultSessionPath = "./sessions";
 
     /// <summary>
     /// Initializes the manager with a custom storage provider.
     /// </summary>
     /// <param name="store">Any implementation of ISessionStore (FileSystem, PostgreSQL, etc.)</param>
-    public SessionManager(ISessionStore store)
+    public SessionManager(StorageOptions storageOptions)
     {
-        _store = store ?? throw new ArgumentNullException(nameof(store));
-    }
+        // ... same validation as CheckpointManager
+        _store = StoreSessionFactory.Create(storageOptions);
 
-    /// <summary>
-    /// Initializes the manager with the default FileSystem store.
-    /// Sessions are saved to ./sessions by default.
-    /// </summary>
-    public SessionManager() : this(new FileSystemSessionStore(_defaultSessionPath))
-    {
-    }
+        if (storageOptions?.DbStoreOptions?.EnsureSchemaOnStartup == true && _store is IDbSessionStore dbStore)
+        {
+            dbStore.EnsureSchemaAsync().GetAwaiter().GetResult();
+        }
 
-    /// <summary>
-    /// Initializes the manager with the default FileSystem store at a custom root path.
-    /// </summary>
-    /// <param name="rootPath">Root directory where sessions will be stored.</param>
-    public SessionManager(string rootPath) : this(new FileSystemSessionStore(rootPath))
-    {
-    }
-
-    /// <summary>
-    /// Initializes the manager with the default FileSystem store and enables background saves.
-    /// </summary>
-    /// <param name="options">Background save configuration (Enabled, QueueCapacity, OnError).</param>
-    public SessionManager(BackgroundSaveOptions options)
-        : this(new FileSystemSessionStore(_defaultSessionPath), options)
-    {
-    }
-
-    /// <summary>
-    /// Initializes the manager with a custom storage provider and enables background saves.
-    /// </summary>
-    /// <param name="store">Any implementation of ISessionStore (FileSystem, PostgreSQL, etc.).</param>
-    /// <param name="options">Background save configuration (Enabled, QueueCapacity, OnError).</param>
-    public SessionManager(ISessionStore store, BackgroundSaveOptions options)
-    {
-        _store = store ?? throw new ArgumentNullException(nameof(store));
-
-        if (options != null && options.Enabled)
+        if (storageOptions?.BackgroundSaveOptions?.Enabled == true)
         {
             _backgroundSaver = new BackgroundSaver<SessionCheckpoint>(
-                capacity: options.QueueCapacity,
-                onError: options.OnError
-            );
+                capacity: storageOptions.BackgroundSaveOptions.QueueCapacity,
+                onError: storageOptions?.BackgroundSaveOptions?.OnError);
         }
     }
 
@@ -95,10 +63,8 @@ public class SessionManager : IAsyncDisposable
             Tags = tags ?? new Dictionary<string, string>()
         };
 
-        // --- BACKGROUND MODE ---
         if (_backgroundSaver != null)
         {
-            // DEEP COPY the byte array to prevent mutation during background write
             var capturedSession = new SessionCheckpoint
             {
                 SessionId = session.SessionId,
@@ -115,8 +81,8 @@ public class SessionManager : IAsyncDisposable
             return session.SessionId;
         }
 
-        // --- SYNCHRONOUS MODE (Default) ---
         await _store.SaveAsync(session, cancellationToken);
+
         return session.SessionId;
     }
 
@@ -147,6 +113,12 @@ public class SessionManager : IAsyncDisposable
     public async Task<List<Guid>> ListAsync(string? tagKey = null, string? tagValue = null, CancellationToken cancellationToken = default)
         => await _store.ListAsync(tagKey, tagValue, cancellationToken);
 
+    public Task<List<SessionSummary>> QueryAsync(SessionQuery query, CancellationToken cancellationToken = default)
+        => _store.QueryAsync(query, cancellationToken);
+
+    public IAsyncEnumerable<SessionSummary> QueryStreamAsync(SessionQuery query, CancellationToken cancellationToken = default)
+        => _store.QueryStreamAsync(query, cancellationToken);
+
     /// <summary>
     /// Disposes the manager and ensures the background saver finishes all pending operations.
     /// <para>
@@ -160,8 +132,9 @@ public class SessionManager : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         if (_backgroundSaver != null)
-        {
             await _backgroundSaver.DisposeAsync();
-        }
+
+        if (_store is IAsyncDisposable asyncDisposable)
+            await asyncDisposable.DisposeAsync();
     }
 }

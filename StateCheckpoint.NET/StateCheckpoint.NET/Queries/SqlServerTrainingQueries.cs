@@ -1,4 +1,4 @@
-﻿namespace StateCheckpoint.NET.Stores;
+﻿namespace StateCheckpoint.NET;
 
 /// <summary>
 /// SQL Server queries specific to the Training (Model) domain.

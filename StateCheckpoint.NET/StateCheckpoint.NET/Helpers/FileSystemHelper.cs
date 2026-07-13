@@ -1,7 +1,7 @@
 ﻿using System.Text.Json;
 using StateCheckpoint.NET.Settings;
 
-namespace StateCheckpoint.NET.Stores;
+namespace StateCheckpoint.NET;
 
 internal static class FileSystemHelper
 {

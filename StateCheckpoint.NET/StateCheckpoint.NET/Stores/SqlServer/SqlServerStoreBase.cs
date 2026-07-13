@@ -1,13 +1,13 @@
 ﻿using Microsoft.Data.SqlClient;
 using System.Data;
 
-namespace StateCheckpoint.NET.Stores;
+namespace StateCheckpoint.NET;
 
 /// <summary>
 /// Abstract base class for SQL Server stores.
 /// Manages connection lifecycle and lazy opening.
 /// </summary>
-public abstract class SqlServerStoreBase : IAsyncDisposable
+internal abstract class SqlServerStoreBase : IAsyncDisposable
 {
     private readonly string _connectionString = string.Empty;
     private SqlConnection? _connection;

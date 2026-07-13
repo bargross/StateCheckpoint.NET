@@ -1,6 +1,6 @@
 ﻿using StateCheckpoint.NET.Models;
 
-namespace StateCheckpoint.NET.Stores;
+namespace StateCheckpoint.NET;
 
 internal class SessionManifest
 {
