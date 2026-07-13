@@ -224,7 +224,7 @@ internal class SqlServerModelStore : SqlServerStoreBase, IDbModelStore
     private (string Sql, List<SqlParameter> Parameters) BuildQuerySql(CheckpointQuery query, bool includeOrderBy = true, bool includeLimit = true)
     {
         var sql = new StringBuilder(@"
-        SELECT model_id, epoch, loss, created_at, tags
+        SELECT modelId, epoch, loss, createdAt, tags
         FROM ModelManifests
         WHERE 1=1
     ");
@@ -253,10 +253,10 @@ internal class SqlServerModelStore : SqlServerStoreBase, IDbModelStore
         {
             var orderColumn = query.OrderBy switch
             {
-                CheckpointSortField.CreatedAt => "created_at",
+                CheckpointSortField.CreatedAt => "createdAt",
                 CheckpointSortField.Epoch => "epoch",
                 CheckpointSortField.Loss => "loss",
-                _ => "created_at"
+                _ => "createdAt"
             };
 
             sql.Append($" ORDER BY {orderColumn} {(query.Descending ? "DESC" : "ASC")}");

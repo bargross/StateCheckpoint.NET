@@ -52,54 +52,21 @@ public class CheckpointManager : IAsyncDisposable
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>Returns the ModelId (GUID) of the saved checkpoint.</returns>
     public async Task<Guid> SaveAsync(
-        byte[] weights,
-        byte[] optimizer,
-        HyperParameters hyperParams,
-        TokenizerData tokenizer,
-        int epoch,
-        float loss,
-        Guid? existingId = null,
-        Dictionary<string, string>? tags = null,
+        ModelCheckpoint modelCheckpoint,
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        var checkpoint = new ModelCheckpoint
-        {
-            ModelId = existingId ?? Guid.NewGuid(),
-            WeightsBytes = weights,
-            OptimizerBytes = optimizer,
-            HyperParams = hyperParams,
-            Tokenizer = tokenizer,
-            CurrentEpoch = epoch,
-            LastTrainingLoss = loss,
-            CreatedAt = DateTime.UtcNow,
-            Tags = tags ?? new Dictionary<string, string>()
-        };
-
         if (_backgroundSaver != null)
         {
-            var capturedCheckpoint = new ModelCheckpoint
-            {
-                ModelId = checkpoint.ModelId,
-                WeightsBytes = checkpoint.WeightsBytes.ToArray(),
-                OptimizerBytes = checkpoint.OptimizerBytes.ToArray(),
-                HyperParams = checkpoint.HyperParams,
-                Tokenizer = checkpoint.Tokenizer,
-                CurrentEpoch = checkpoint.CurrentEpoch,
-                LastTrainingLoss = checkpoint.LastTrainingLoss,
-                CreatedAt = checkpoint.CreatedAt,
-                Tags = checkpoint.Tags
-            };
+            await _backgroundSaver.EnqueueAsync(async (ct) => await _store.SaveAsync(modelCheckpoint, ct), cancellationToken);
 
-            await _backgroundSaver.EnqueueAsync(async (ct) => await _store.SaveAsync(capturedCheckpoint, ct), cancellationToken);
-
-            return checkpoint.ModelId;
+            return modelCheckpoint.ModelId;
         }
 
-        await _store.SaveAsync(checkpoint, cancellationToken);
+        await _store.SaveAsync(modelCheckpoint, cancellationToken);
 
-        return checkpoint.ModelId;
+        return modelCheckpoint.ModelId;
     }
 
     /// Finds the checkpoint with the highest score according to a user-supplied selector.
@@ -141,6 +108,12 @@ public class CheckpointManager : IAsyncDisposable
     public Task<List<CheckpointSummary>> QueryAsync(CheckpointQuery query, CancellationToken cancellationToken = default)
         => _store.QueryAsync(query, cancellationToken);
 
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="query"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
     public IAsyncEnumerable<CheckpointSummary> QueryStreamAsync(CheckpointQuery query, CancellationToken cancellationToken = default)
         => _store.QueryStreamAsync(query, cancellationToken);
 
@@ -178,8 +151,9 @@ public class CheckpointManager : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         if (_backgroundSaver != null)
-        {
             await _backgroundSaver.DisposeAsync();
-        }
+        
+        if (_store is IAsyncDisposable asyncDisposable)
+            await asyncDisposable.DisposeAsync();
     }
 }

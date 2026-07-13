@@ -3,6 +3,9 @@ using StateCheckpoint.NET.Settings;
 
 namespace StateCheckpoint.NET;
 
+/// <summary>
+/// 
+/// </summary>
 public class SessionManager : IAsyncDisposable
 {
     private readonly ISessionStore _store;
@@ -14,19 +17,24 @@ public class SessionManager : IAsyncDisposable
     /// <param name="store">Any implementation of ISessionStore (FileSystem, PostgreSQL, etc.)</param>
     public SessionManager(StorageOptions storageOptions)
     {
-        // ... same validation as CheckpointManager
+        if (storageOptions.StoreType == StoreType.SqlDb && string.IsNullOrWhiteSpace(storageOptions.DbStoreOptions?.ConnectionString))
+            throw new InvalidOperationException("ConnectionString is required when StoreType is SqlDb.");
+
+        if (storageOptions.StoreType == StoreType.Local && string.IsNullOrWhiteSpace(storageOptions.FileSystemStoreOptions?.RootPath))
+            throw new InvalidOperationException("RootPath is required when StoreType is Local.");
+
         _store = StoreSessionFactory.Create(storageOptions);
 
-        if (storageOptions?.DbStoreOptions?.EnsureSchemaOnStartup == true && _store is IDbSessionStore dbStore)
+        if (storageOptions.DbStoreOptions?.EnsureSchemaOnStartup == true && _store is IDbSessionStore dbStore)
         {
             dbStore.EnsureSchemaAsync().GetAwaiter().GetResult();
         }
 
-        if (storageOptions?.BackgroundSaveOptions?.Enabled == true)
+        if (storageOptions.BackgroundSaveOptions?.Enabled == true)
         {
             _backgroundSaver = new BackgroundSaver<SessionCheckpoint>(
                 capacity: storageOptions.BackgroundSaveOptions.QueueCapacity,
-                onError: storageOptions?.BackgroundSaveOptions?.OnError);
+                onError: storageOptions.BackgroundSaveOptions?.OnError);
         }
     }
 
@@ -42,48 +50,21 @@ public class SessionManager : IAsyncDisposable
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>Returns the SessionId (GUID) of the saved session.</returns>
     public async Task<Guid> SaveAsync(
-        Guid sessionId,
-        byte[] kvCacheBytes,
-        int[] tokenHistory,
-        string modelFingerprint,
-        SamplingData? samplingConfig = null,
-        Dictionary<string, string>? tags = null,
+        SessionCheckpoint sessionCheckpoint,
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        var session = new SessionCheckpoint
-        {
-            SessionId = sessionId,
-            KvCacheBytes = kvCacheBytes,
-            TokenHistory = tokenHistory,
-            ModelFingerprint = modelFingerprint,
-            SamplingConfig = samplingConfig ?? new SamplingData(),
-            LastUpdated = DateTime.UtcNow,
-            Tags = tags ?? new Dictionary<string, string>()
-        };
-
         if (_backgroundSaver != null)
-        {
-            var capturedSession = new SessionCheckpoint
-            {
-                SessionId = session.SessionId,
-                KvCacheBytes = session.KvCacheBytes.ToArray(),
-                TokenHistory = session.TokenHistory,
-                ModelFingerprint = session.ModelFingerprint,
-                SamplingConfig = session.SamplingConfig,
-                LastUpdated = session.LastUpdated,
-                Tags = session.Tags
-            };
+        { 
+            await _backgroundSaver.EnqueueAsync(async (cToken) => await _store.SaveAsync(sessionCheckpoint, cToken));
 
-            await _backgroundSaver.EnqueueAsync(async (cToken) => await _store.SaveAsync(capturedSession, cToken));
-
-            return session.SessionId;
+            return sessionCheckpoint.SessionId;
         }
 
-        await _store.SaveAsync(session, cancellationToken);
+        await _store.SaveAsync(sessionCheckpoint, cancellationToken);
 
-        return session.SessionId;
+        return sessionCheckpoint.SessionId;
     }
 
     /// <summary>
@@ -113,9 +94,21 @@ public class SessionManager : IAsyncDisposable
     public async Task<List<Guid>> ListAsync(string? tagKey = null, string? tagValue = null, CancellationToken cancellationToken = default)
         => await _store.ListAsync(tagKey, tagValue, cancellationToken);
 
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="query"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
     public Task<List<SessionSummary>> QueryAsync(SessionQuery query, CancellationToken cancellationToken = default)
         => _store.QueryAsync(query, cancellationToken);
 
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="query"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
     public IAsyncEnumerable<SessionSummary> QueryStreamAsync(SessionQuery query, CancellationToken cancellationToken = default)
         => _store.QueryStreamAsync(query, cancellationToken);
 

@@ -1,5 +1,6 @@
 ﻿using StateCheckpoint.NET.Models;
 using StateCheckpoint.NET.Settings;
+using System.Runtime.CompilerServices;
 
 namespace StateCheckpoint.NET;
 
@@ -133,49 +134,66 @@ internal class FileSystemSessionStore : IFileSystemSessionStore
         return await _index.QueryAsync(query, cancellationToken);
     }
 
-    // Rebuild index from all session manifest files (fallback)
-    public async Task RebuildIndexAsync(CancellationToken cancellationToken)
+    public async IAsyncEnumerable<SessionSummary> QueryStreamAsync(
+        SessionQuery query,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        await _buildLock.WaitAsync(cancellationToken);
-        try
+        await EnsureIndexLoadedAsync(cancellationToken);
+        var all = await _index.GetAllAsync(cancellationToken);
+
+        foreach (var summary in all)
         {
-            // Double-check after acquiring the lock
-            await EnsureIndexLoadedAsync(cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
 
-            var existing = await _index.GetAllAsync(cancellationToken);
+            // Apply filters
+            if (!string.IsNullOrEmpty(query.ModelFingerprint) && summary.ModelFingerprint != query.ModelFingerprint) continue;
+            if (query.UpdatedAfter.HasValue && summary.LastUpdated < query.UpdatedAfter.Value) continue;
+            if (query.UpdatedBefore.HasValue && summary.LastUpdated > query.UpdatedBefore.Value) continue;
+            if (query.Tags != null && query.Tags.Count > 0 && !TagsHelper.TagsMatch(summary.Tags, query.Tags)) continue;
 
-            if (existing.Any()) return; // already rebuilt by another thread
-
-            await _index.RebuildAsync(_rootPath, LoadManifestSummaryAsync, cancellationToken);
-        }
-        finally
-        {
-            _buildLock.Release();
+            yield return summary;
         }
     }
+
+    //---------------- Private Methods ----------------//
 
     // Ensure the index is loaded into memory (lazy)
     private async Task EnsureIndexLoadedAsync(CancellationToken cancellationToken)
     {
         if (!_indexLoaded)
         {
-            await _index.LoadAsync(cancellationToken);
+            await _buildLock.WaitAsync(cancellationToken);
+            try
+            {
+                if (_indexLoaded) return;
 
-            _indexLoaded = true;
+                await _index.LoadAsync(cancellationToken);
+
+                var entries = await _index.GetAllAsync(cancellationToken);
+                if (!entries.Any())
+                {
+                    await _index.RebuildAsync(_rootPath, async (rootPath, id, ct) =>
+                    {
+                        var manifest = await FileSystemHelper
+                            .LoadManifestOnlyAsync<SessionManifest>(rootPath, id, "meta.json", ct);
+
+                        if (manifest == null) return null;
+                        
+                        return new SessionSummary
+                        {
+                            SessionId = id,
+                            ModelFingerprint = manifest.ModelFingerprint,
+                            LastUpdated = manifest.LastUpdated,
+                            Tags = manifest.Tags ?? new Dictionary<string, string>()
+                        };
+                    }, cancellationToken);
+                }
+                _indexLoaded = true;
+            }
+            finally
+            {
+                _buildLock.Release();
+            }
         }
-    }
-
-    private async Task<SessionSummary?> LoadManifestSummaryAsync(string rootPath, Guid id, CancellationToken ct)
-    {
-        var manifest = await FileSystemHelper.LoadManifestOnlyAsync<SessionManifest>(
-            rootPath, id, "meta.json", ct);
-        if (manifest == null) return null;
-        return new SessionSummary
-        {
-            SessionId = id,
-            ModelFingerprint = manifest.ModelFingerprint,
-            LastUpdated = manifest.LastUpdated,
-            Tags = manifest.Tags ?? new Dictionary<string, string>()
-        };
     }
 }

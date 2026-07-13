@@ -19,12 +19,12 @@ internal sealed class SessionIndex
         _items = new List<SessionSummary>();
     }
 
-    public async Task LoadAsync(CancellationToken ct = default)
+    public async Task LoadAsync(CancellationToken cancellationToken = default)
     {
-        await _lock.WaitAsync(ct);
+        await _lock.WaitAsync(cancellationToken);
         try
         {
-            var data = await _storage.ReadAsync(ct);
+            var data = await _storage.ReadAsync(cancellationToken);
             _items = data.ToList();
         }
         finally
@@ -58,14 +58,14 @@ internal sealed class SessionIndex
         }
     }
 
-    public async Task RemoveAsync(Guid sessionId, CancellationToken ct = default)
+    public async Task RemoveAsync(Guid sessionId, CancellationToken cancellationToken = default)
     {
-        await _lock.WaitAsync(ct);
+        await _lock.WaitAsync(cancellationToken);
         try
         {
             var removed = _items.RemoveAll(e => e.SessionId == sessionId);
             if (removed > 0)
-                await _storage.WriteAsync(_items, ct);
+                await _storage.WriteAsync(_items, cancellationToken);
         }
         finally
         {
@@ -76,18 +76,18 @@ internal sealed class SessionIndex
     public async Task RebuildAsync(
         string rootPath,
         Func<string, Guid, CancellationToken, Task<SessionSummary?>> loadManifestFn,
-        CancellationToken ct = default)
+        CancellationToken cancellationToken = default)
     {
-        await _lock.WaitAsync(ct);
+        await _lock.WaitAsync(cancellationToken);
         try
         {
-            var allIds = await FileSystemHelper.ListAsync(rootPath, ct);
+            var allIds = await FileSystemHelper.ListAsync(rootPath, cancellationToken);
 
             var newItems = new List<SessionSummary>();
             foreach (var id in allIds)
             {
-                ct.ThrowIfCancellationRequested();
-                var summary = await loadManifestFn(rootPath, id, ct);
+                cancellationToken.ThrowIfCancellationRequested();
+                var summary = await loadManifestFn(rootPath, id, cancellationToken);
 
                 if (summary != null)
                     newItems.Add(summary);
@@ -95,7 +95,7 @@ internal sealed class SessionIndex
 
             _items = newItems;
 
-            await _storage.WriteAsync(_items, ct);
+            await _storage.WriteAsync(_items, cancellationToken);
         }
         finally
         {
@@ -103,9 +103,9 @@ internal sealed class SessionIndex
         }
     }
 
-    public async Task<IReadOnlyList<SessionSummary>> GetAllAsync(CancellationToken ct = default)
+    public async Task<IReadOnlyList<SessionSummary>> GetAllAsync(CancellationToken cancellationToken = default)
     {
-        await _lock.WaitAsync(ct);
+        await _lock.WaitAsync(cancellationToken);
 
         try
         {

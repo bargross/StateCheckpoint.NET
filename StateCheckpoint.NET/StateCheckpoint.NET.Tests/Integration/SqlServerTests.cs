@@ -1,6 +1,6 @@
-﻿using StateCheckpoint.NET.Manager;
-using StateCheckpoint.NET.Stores;
-using Microsoft.Data.SqlClient;
+﻿using Microsoft.Data.SqlClient;
+using StateCheckpoint.NET.Models;
+using StateCheckpoint.NET.Settings;
 using Testcontainers.MsSql;
 
 namespace StateCheckpoint.NET.Tests.Integration.SqlServer;
@@ -8,8 +8,8 @@ namespace StateCheckpoint.NET.Tests.Integration.SqlServer;
 [Collection("NonParallel")]
 public class SqlServerTests : IntegrationTestsBase
 {
-    private readonly MsSqlContainer? _container = null;
-    private readonly string _connectionString = string.Empty;
+    private readonly MsSqlContainer? _container;
+    private string _connectionString = string.Empty;
     private readonly bool _useTestcontainers;
 
     public SqlServerTests()
@@ -25,39 +25,62 @@ public class SqlServerTests : IntegrationTestsBase
         }
         else
         {
-            _connectionString = "Data Source=(localdb)\\MSSQLLocalDB;Initial Catalog=CheckpointIntegration;Integrated Security=True;";
+            _connectionString = "Data Source=(localdb)\\MSSQLLocalDB;Initial Catalog=master;Integrated Security=True;";
         }
     }
 
-    protected override async Task InitializeStoresAsync()
+    protected override StorageOptions GetCheckpointStorageOptions()
     {
-        string finalConnectionString;
-
-        if (_useTestcontainers)
+        return new StorageOptions
         {
-            await _container!.StartAsync();
-            finalConnectionString = _container.GetConnectionString();
-        }
-        else
-        {
-            await EnsureLocalDbDatabaseExistsAsync();
-            finalConnectionString = _connectionString;
-        }
-
-        var modelStore = new SqlServerModelStore(finalConnectionString);
-        var sessionStore = new SqlServerSessionStore(finalConnectionString);
-
-        await modelStore.EnsureSchemaAsync();
-        await sessionStore.EnsureSchemaAsync();
-
-        CheckpointManager = new CheckpointManager(modelStore);
-        SessionManager = new SessionManager(sessionStore);
+            StoreType = StoreType.SqlDb,
+            SqlDbType = SqlDbType.SqlServer,
+            DbStoreOptions = new DbStorageOptions
+            {
+                ConnectionString = GetConnectionString(),
+                EnsureSchemaOnStartup = true
+            }
+        };
     }
 
-    private static async Task EnsureLocalDbDatabaseExistsAsync()
+    protected override StorageOptions GetSessionStorageOptions()
+    {
+        return new StorageOptions
+        {
+            StoreType = StoreType.SqlDb,
+            SqlDbType = SqlDbType.SqlServer,
+            DbStoreOptions = new DbStorageOptions
+            {
+                ConnectionString = GetConnectionString(),
+                EnsureSchemaOnStartup = true
+            }
+        };
+    }
+
+    private string GetConnectionString()
+    {
+        if (_useTestcontainers)
+            return _container!.GetConnectionString();
+        
+        else return _connectionString;
+    }
+
+    public override async Task InitializeAsync()
+    {
+        if (_useTestcontainers)
+            await _container!.StartAsync();
+
+        else await EnsureLocalDbDatabaseExistsAsync();
+
+        await base.InitializeAsync();
+
+        await TruncateTablesAsync();
+    }
+
+    private async Task EnsureLocalDbDatabaseExistsAsync()
     {
         const string masterConnectionString = "Data Source=(localdb)\\MSSQLLocalDB;Initial Catalog=master;Integrated Security=True;";
-        using var connection = new SqlConnection(masterConnectionString);
+        await using var connection = new SqlConnection(masterConnectionString);
         await connection.OpenAsync();
 
         var createDbQuery = @"
@@ -65,16 +88,68 @@ public class SqlServerTests : IntegrationTestsBase
             BEGIN
                 CREATE DATABASE [CheckpointIntegration];
             END";
-        using var command = new SqlCommand(createDbQuery, connection);
+        await using var command = new SqlCommand(createDbQuery, connection);
         await command.ExecuteNonQueryAsync();
+
+        _connectionString = "Data Source=(localdb)\\MSSQLLocalDB;Initial Catalog=CheckpointIntegration;Integrated Security=True;";
     }
 
-    protected override async Task CleanupStoresAsync()
+    private async Task TruncateTablesAsync()
     {
-        if (_useTestcontainers && _container != null)
+        try
         {
-            await _container.DisposeAsync();
+            var connString = GetConnectionString();
+
+            await using var connection = new SqlConnection(connString);
+
+            await connection.OpenAsync();
+
+            // Check if tables exist
+            var checkTables = @"
+                SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES 
+                WHERE TABLE_NAME IN ('ModelManifests', 'ModelBlobs', 'InferenceSessions')";
+
+            await using var checkCmd = new SqlCommand(checkTables, connection);
+
+            var tableCount = (int)await checkCmd.ExecuteScalarAsync();
+
+            if (tableCount < 3)
+                return;
+            
+            try
+            {
+                await using var truncateCmd = new SqlCommand(
+                    "TRUNCATE TABLE ModelBlobs; TRUNCATE TABLE ModelManifests; TRUNCATE TABLE InferenceSessions;",
+                    connection);
+
+                await truncateCmd.ExecuteNonQueryAsync();
+            }
+            catch (SqlException ex) when (ex.Number == 4712)
+            {
+                await using var deleteCmd = new SqlCommand(
+                    "DELETE FROM ModelBlobs; DELETE FROM ModelManifests; DELETE FROM InferenceSessions;",
+                    connection);
+
+                await deleteCmd.ExecuteNonQueryAsync();
+            }
+            catch (Exception ex)
+            {
+                throw; // rethrow to make test fail so we can see the error
+            }
         }
+        catch (Exception ex)
+        {
+            throw; // rethrow so test fails and we can diagnose
+        }
+    }
+
+    protected override async Task CleanupAsync()
+    {
+        // Truncate again after the test (for safety)
+        await TruncateTablesAsync();
+
+        if (_useTestcontainers && _container != null)
+            await _container.DisposeAsync();
     }
 
     [Fact]
@@ -82,4 +157,10 @@ public class SqlServerTests : IntegrationTestsBase
 
     [Fact]
     public async Task Session_RoundTrip_ShouldWork() => await RoundTrip_Session_ShouldSaveLoadDeleteList();
+
+    [Fact]
+    public async Task Query_ShouldReturnFilteredSummaries() => await base.Query_ShouldReturnFilteredSummaries();
+
+    [Fact]
+    public async Task FindBest_ShouldReturnBestCheckpoint() => await base.FindBest_ShouldReturnBestCheckpoint();
 }

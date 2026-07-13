@@ -1,5 +1,5 @@
 ﻿namespace StateCheckpoint.NET;
 
-internal interface IFileSystenModelStore: IModelStore
+internal interface IFileSystemModelStore: IModelStore
 {
 }

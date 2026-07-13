@@ -84,22 +84,25 @@ internal sealed class CheckpointIndex
     public async Task RebuildAsync(
         string rootPath,
         Func<string, Guid, CancellationToken, Task<CheckpointSummary?>> loadManifestFn,
-        CancellationToken ct = default)
+        CancellationToken cancellationToken = default)
     {
-        await _lock.WaitAsync(ct);
+        await _lock.WaitAsync(cancellationToken);
         try
         {
-            var allIds = await FileSystemHelper.ListAsync(rootPath, ct);
+            var allIds = await FileSystemHelper.ListAsync(rootPath, cancellationToken);
+
             var newItems = new List<CheckpointSummary>();
             foreach (var id in allIds)
             {
-                ct.ThrowIfCancellationRequested();
-                var summary = await loadManifestFn(rootPath, id, ct);
+                cancellationToken.ThrowIfCancellationRequested();
+                var summary = await loadManifestFn(rootPath, id, cancellationToken);
                 if (summary != null)
                     newItems.Add(summary);
             }
+
             _items = newItems;
-            await _storage.WriteAsync(_items, ct);
+
+            await _storage.WriteAsync(_items, cancellationToken);
         }
         finally
         {
@@ -110,9 +113,9 @@ internal sealed class CheckpointIndex
     /// <summary>
     /// Returns a copy of all items (for querying).
     /// </summary>
-    public async Task<IReadOnlyList<CheckpointSummary>> GetAllAsync(CancellationToken ct = default)
+    public async Task<IReadOnlyList<CheckpointSummary>> GetAllAsync(CancellationToken cancellationToken = default)
     {
-        await _lock.WaitAsync(ct);
+        await _lock.WaitAsync(cancellationToken);
         try
         {
             return _items.ToList(); // defensive copy
@@ -128,9 +131,9 @@ internal sealed class CheckpointIndex
     /// </summary>
     public async Task<List<CheckpointSummary>> QueryAsync(
         CheckpointQuery query,
-        CancellationToken ct = default)
+        CancellationToken cancellationToken = default)
     {
-        var all = await GetAllAsync(ct);
+        var all = await GetAllAsync(cancellationToken);
         var filtered = all.AsEnumerable();
 
         // Apply filters (same as before)
@@ -141,7 +144,7 @@ internal sealed class CheckpointIndex
         if (query.CreatedAfter.HasValue) filtered = filtered.Where(s => s.CreatedAt >= query.CreatedAfter.Value);
         if (query.CreatedBefore.HasValue) filtered = filtered.Where(s => s.CreatedAt <= query.CreatedBefore.Value);
         if (query.Tags != null && query.Tags.Count > 0)
-            filtered = filtered.Where(s => TagsMatch(s.Tags, query.Tags));
+            filtered = filtered.Where(s => TagsHelper.TagsMatch(s.Tags, query.Tags));
 
         // Sort
         var sorted = query.OrderBy switch
@@ -162,20 +165,5 @@ internal sealed class CheckpointIndex
             sorted = sorted.Take(query.Limit.Value);
 
         return sorted.ToList();
-    }
-
-    private static bool TagsMatch(Dictionary<string, string>? actual, Dictionary<string, string>? filter)
-    {
-        if (filter == null) 
-            return true;
-
-        if (actual == null) 
-            return false;
-
-        foreach (var pair in filter)
-            if (!actual.TryGetValue(pair.Key, out var val) || val != pair.Value)
-                return false;
-
-        return true;
     }
 }

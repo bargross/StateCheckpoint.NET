@@ -23,7 +23,7 @@ internal class FileSystemModelStore : IFileSystemModelStore
             if (!FileSystemHelper.TryValidateWriteAccess(_rootPath, out var error))
             {
                 // If fallback is provided, update the root path
-                if (!string.IsNullOrEmpty(_options.FallbackPath))
+                if (!string.IsNullOrWhiteSpace(_options.FallbackPath))
                 {
                     _rootPath = Path.Combine(_options.FallbackPath, "models");
 
@@ -35,14 +35,10 @@ internal class FileSystemModelStore : IFileSystemModelStore
                 }
             }
         }
-        else
-        {
-            // Still ensure the directory exists if required
-            if (_options.EnsureDirectoryExists)
-            {
+
+        // Still ensure the directory exists if required
+        else if (_options.EnsureDirectoryExists)
                 Directory.CreateDirectory(_rootPath);
-            }
-        }
 
         var indexFilePath = Path.Combine(_rootPath, "_index.json");
 
@@ -155,67 +151,23 @@ internal class FileSystemModelStore : IFileSystemModelStore
 
     public async Task<List<CheckpointSummary>> QueryAsync(CheckpointQuery query, CancellationToken cancellationToken = default)
     {
-        var allIds = await FileSystemHelper.ListAsync(_rootPath, cancellationToken);
-        var summaries = new List<CheckpointSummary>();
+        await EnsureIndexLoadedAsync(cancellationToken);
 
-        foreach (var id in allIds)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            var manifest = await FileSystemHelper.LoadManifestOnlyAsync<ModelManifest>(_rootPath, id, "manifest.json", cancellationToken);
-            if (manifest == null) continue;
-
-            // Apply filters
-            if (query.MinEpoch.HasValue && manifest.CurrentEpoch < query.MinEpoch) continue;
-            if (query.MaxEpoch.HasValue && manifest.CurrentEpoch > query.MaxEpoch) continue;
-            if (query.MinLoss.HasValue && manifest.LastTrainingLoss < query.MinLoss) continue;
-            if (query.MaxLoss.HasValue && manifest.LastTrainingLoss > query.MaxLoss) continue;
-            if (query.CreatedAfter.HasValue && manifest.CreatedAt < query.CreatedAfter) continue;
-            if (query.CreatedBefore.HasValue && manifest.CreatedAt > query.CreatedBefore) continue;
-            if (query.Tags != null && !TagsMatch(manifest.Tags, query.Tags)) continue;
-
-            summaries.Add(new CheckpointSummary
-            {
-                ModelId = id,
-                CurrentEpoch = manifest.CurrentEpoch,
-                LastTrainingLoss = manifest.LastTrainingLoss,
-                CreatedAt = manifest.CreatedAt,
-                Tags = manifest.Tags ?? new()
-            });
-        }
-
-        // Sorting
-        summaries = query.OrderBy switch
-        {
-            CheckpointSortField.CreatedAt => query.Descending
-                ? summaries.OrderByDescending(s => s.CreatedAt).ToList()
-                : summaries.OrderBy(s => s.CreatedAt).ToList(),
-            CheckpointSortField.Epoch => query.Descending
-                ? summaries.OrderByDescending(s => s.CurrentEpoch).ToList()
-                : summaries.OrderBy(s => s.CurrentEpoch).ToList(),
-            CheckpointSortField.Loss => query.Descending
-                ? summaries.OrderByDescending(s => s.LastTrainingLoss).ToList()
-                : summaries.OrderBy(s => s.LastTrainingLoss).ToList(),
-            _ => summaries
-        };
-
-        if (query.Limit.HasValue && query.Limit.Value > 0)
-            summaries = summaries.Take(query.Limit.Value).ToList();
-
-        return summaries;
+        return await _index.QueryAsync(query, cancellationToken);
     }
 
     public async IAsyncEnumerable<CheckpointSummary> QueryStreamAsync(
         CheckpointQuery query,
-        [EnumeratorCancellation] CancellationToken ct = default)
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        await EnsureIndexLoadedAsync(ct);
-        var all = await _index.GetAllAsync(ct);
+        await EnsureIndexLoadedAsync(cancellationToken);
+
+        var all = await _index.GetAllAsync(cancellationToken);
 
         // Filter in memory (no sorting/limiting – streaming preserves order of storage)
         foreach (var summary in all)
         {
-            ct.ThrowIfCancellationRequested();
+            cancellationToken.ThrowIfCancellationRequested();
 
             if (query.MinEpoch.HasValue && summary.CurrentEpoch < query.MinEpoch) continue;
             if (query.MaxEpoch.HasValue && summary.CurrentEpoch > query.MaxEpoch) continue;
@@ -223,72 +175,52 @@ internal class FileSystemModelStore : IFileSystemModelStore
             if (query.MaxLoss.HasValue && summary.LastTrainingLoss > query.MaxLoss) continue;
             if (query.CreatedAfter.HasValue && summary.CreatedAt < query.CreatedAfter) continue;
             if (query.CreatedBefore.HasValue && summary.CreatedAt > query.CreatedBefore) continue;
-            if (query.Tags != null && query.Tags.Count > 0 && !TagsMatch(summary.Tags, query.Tags)) continue;
+            if (query.Tags != null && query.Tags.Count > 0 && !TagsHelper.TagsMatch(summary.Tags, query.Tags)) continue;
 
             yield return summary;
         }
     }
 
-    private static bool TagsMatch(Dictionary<string, string>? actual, Dictionary<string, string>? filter)
+    private async Task EnsureIndexLoadedAsync(CancellationToken cancellationToken)
     {
-        if (filter == null) 
-            return true;
-
-        if (actual == null) 
-            return false;
-
-        foreach (var pair in filter)
-            if (!actual.TryGetValue(pair.Key, out var val) || val != pair.Value)
-                return false;
-
-        return true;
-    }
-
-    private async Task EnsureIndexLoadedAsync(CancellationToken ct)
-    {
-        // We can check if _items is empty or use a flag; simplest: always load if not loaded.
-        // We'll have a separate field to track loaded state.
-        // Here we just call LoadAsync if needed. Since it's cheap, we can call it every time.
-        // But better to check a flag.
         if (!_indexLoaded)
         {
-            await _index.LoadAsync(ct);
-            _indexLoaded = true;
-        }
-    }
-
-    private async Task RebuildIndexAsync(CancellationToken ct)
-    {
-        await _buildLock.WaitAsync(ct);
-        try
-        {
-            // double-check after lock
-            await EnsureIndexLoadedAsync(ct);
-            var existing = await _index.GetAllAsync(ct);
-            if (existing.Any()) return;
-
-            async Task<CheckpointSummary?> LoadManifestSummaryAsync(string rootPath, Guid id, CancellationToken ct)
+            await _buildLock.WaitAsync(cancellationToken);
+            try
             {
-                var manifest = await FileSystemHelper.LoadManifestOnlyAsync<ModelManifest>(rootPath, id, "manifest.json", ct);
+                if (_indexLoaded) return; // double-check
 
-                if (manifest == null) return null;
+                // Load the index from disk
+                await _index.LoadAsync(cancellationToken);
 
-                return new CheckpointSummary
+                var entries = await _index.GetAllAsync(cancellationToken);
+
+                // If index is empty, rebuild it from manifests
+                if (!entries.Any())
                 {
-                    ModelId = id,
-                    CurrentEpoch = manifest.CurrentEpoch,
-                    LastTrainingLoss = manifest.LastTrainingLoss,
-                    CreatedAt = manifest.CreatedAt,
-                    Tags = manifest.Tags ?? new()
-                };
-            }
+                    await _index.RebuildAsync(_rootPath, async (string rootPath, Guid id, CancellationToken ct) =>
+                    {
+                        var manifest = await FileSystemHelper.LoadManifestOnlyAsync<ModelManifest>(rootPath, id, "manifest.json", ct);
 
-            // Rebuild
-            await _index.RebuildAsync(_rootPath, LoadManifestSummaryAsync, ct);
-        }
-        finally
-        {
-            _buildLock.Release();
+                        if (manifest == null) return null;
+
+                        return new CheckpointSummary
+                        {
+                            ModelId = id,
+                            CurrentEpoch = manifest.CurrentEpoch,
+                            LastTrainingLoss = manifest.LastTrainingLoss,
+                            CreatedAt = manifest.CreatedAt,
+                            Tags = manifest.Tags ?? new()
+                        };
+                    }, cancellationToken);
+                }
+
+                _indexLoaded = true;
+            }
+            finally
+            {
+                _buildLock.Release();
+            }
         }
     }
 }

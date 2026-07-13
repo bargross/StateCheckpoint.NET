@@ -1,5 +1,4 @@
-﻿using StateCheckpoint.NET.Manager;
-using FluentAssertions;
+﻿using FluentAssertions;
 
 namespace StateCheckpoint.NET.Tests.Manager;
 

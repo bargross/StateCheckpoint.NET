@@ -2,7 +2,6 @@
 
 namespace StateCheckpoint.NET;
 
-
 internal sealed class IndexStorage<T>
 {
     private readonly string _filePath;
