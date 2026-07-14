@@ -96,6 +96,17 @@ internal class PostgresSessionStore : PostgresStoreBase, IDbSessionStore
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    public async Task DeleteManyAsync(IEnumerable<Guid> sessionIds, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await GetConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        foreach (var id in sessionIds)
+            await DeleteAsync(id, cancellationToken);
+
+        await transaction.CommitAsync(cancellationToken);
+    }
+
     /// <summary>
     /// Gets a list of all session ids
     /// </summary>
@@ -133,17 +144,17 @@ internal class PostgresSessionStore : PostgresStoreBase, IDbSessionStore
         return sessionIds;
     }
 
-    public async Task<List<SessionSummary>> QueryAsync(SessionQuery query, CancellationToken ct = default)
+    public async Task<List<SessionSummary>> QueryAsync(SessionQuery query, CancellationToken cancellationToken = default)
     {
-        await using var connection = await GetConnectionAsync(ct);
+        await using var connection = await GetConnectionAsync(cancellationToken);
         var (sql, parameters) = BuildQuerySql(query, includeOrderBy: true, includeLimit: true);
 
         await using var command = new NpgsqlCommand(sql, connection);
         command.Parameters.AddRange(parameters.ToArray());
 
-        await using var reader = await command.ExecuteReaderAsync(ct);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         var results = new List<SessionSummary>();
-        while (await reader.ReadAsync(ct))
+        while (await reader.ReadAsync(cancellationToken))
         {
             results.Add(new SessionSummary
             {
@@ -181,15 +192,40 @@ internal class PostgresSessionStore : PostgresStoreBase, IDbSessionStore
         }
     }
 
+    public async Task<SessionSummary?> GetSessionSummaryAsync(Guid sessionId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await GetConnectionAsync(cancellationToken);
+
+        const string sql = @"
+        SELECT model_fingerprint, last_updated, tags
+        FROM inference_sessions
+        WHERE session_id = @id";
+        await using var command = new NpgsqlCommand(sql, connection);
+
+        command.Parameters.AddWithValue("@id", sessionId);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+
+        if (!await reader.ReadAsync(cancellationToken)) return null;
+
+        return new SessionSummary
+        {
+            SessionId = sessionId,
+            ModelFingerprint = reader.GetString(0),
+            LastUpdated = reader.GetDateTime(1),
+            Tags = JsonSerializer.Deserialize<Dictionary<string, string>>(reader.GetString(2)) ?? new()
+        };
+    }
+
     //---------------- Private Methods ---------------//
 
     private (string Sql, List<NpgsqlParameter> Parameters) BuildQuerySql(SessionQuery query, bool includeOrderBy = true, bool includeLimit = true)
     {
         var sql = new StringBuilder(@"
-        SELECT session_id, model_fingerprint, last_updated, tags
-        FROM inference_sessions
-        WHERE 1=1
-    ");
+            SELECT session_id, model_fingerprint, last_updated, tags
+            FROM inference_sessions
+            WHERE 1=1
+        ");
 
         var parameters = new List<NpgsqlParameter>();
         int paramIndex = 0;

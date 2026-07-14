@@ -7,6 +7,7 @@ public class CheckpointManager : IAsyncDisposable
 {
     private readonly IModelStore _store;
     private readonly BackgroundSaver<ModelCheckpoint>? _backgroundSaver;
+    private readonly RetentionPolicy _retentionPolicy;
 
     /// <summary>
     /// Initializes the manager with a custom storage provider.
@@ -15,12 +16,9 @@ public class CheckpointManager : IAsyncDisposable
     /// <param name="backgroundOptions"></param>
     public CheckpointManager(StorageOptions storageOptions)
     {
-        // Validate options
-        if (storageOptions.StoreType == StoreType.SqlDb && string.IsNullOrWhiteSpace(storageOptions?.DbStoreOptions?.ConnectionString))
-            throw new InvalidOperationException("ConnectionString is required when StoreType is SqlDb.");
+        storageOptions.Validate();
 
-        if (storageOptions.StoreType == StoreType.Local && string.IsNullOrWhiteSpace(storageOptions?.FileSystemStoreOptions?.RootPath))
-            throw new InvalidOperationException("RootPath is required when StoreType is Local.");
+        _retentionPolicy = storageOptions.RetentionPolicy ?? new RetentionPolicy();
 
         _store = StoreModelFactory.Create(storageOptions);
 
@@ -65,6 +63,9 @@ public class CheckpointManager : IAsyncDisposable
         }
 
         await _store.SaveAsync(modelCheckpoint, cancellationToken);
+
+        if (_retentionPolicy != null)
+            await this.InternalApplyRetentionPolicyAsync(cancellationToken);
 
         return modelCheckpoint.ModelId;
     }
@@ -145,6 +146,24 @@ public class CheckpointManager : IAsyncDisposable
         => await _store.ListAsync(tagKey, tagValue, cancellationToken);
 
     /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    public async Task<int> ApplyRetentionPolicyAsync(CancellationToken cancellationToken = default) 
+        => await this.InternalApplyRetentionPolicyAsync(cancellationToken);
+
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="baseLineId"></param>
+    /// <param name="CandidateId"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    public async Task<CheckpointDiff> CompareAsync(Guid baseLineId, Guid CandidateId, CancellationToken cancellationToken = default) 
+        => await this.InternalCompareAsync(baseLineId, CandidateId, cancellationToken);
+
+    /// <summary>
     /// Disposes the manager and ensures the background saver finishes all pending operations.
     /// Must be called if background saves are enabled.
     /// </summary>
@@ -155,5 +174,17 @@ public class CheckpointManager : IAsyncDisposable
         
         if (_store is IAsyncDisposable asyncDisposable)
             await asyncDisposable.DisposeAsync();
+    }
+
+    //----------- Internal -------------//
+
+    internal RetentionPolicy RetentionPolicy
+    {
+        get { return _retentionPolicy; }
+    }
+
+    internal IModelStore Store
+    {
+        get { return _store; }
     }
 }

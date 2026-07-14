@@ -158,25 +158,31 @@ internal class SqlServerModelStore : SqlServerStoreBase, IDbModelStore
         }
     }
 
-    public async Task<List<CheckpointSummary>> QueryAsync(CheckpointQuery query, CancellationToken ct = default)
+    public async Task<List<CheckpointSummary>> QueryAsync(CheckpointQuery query, CancellationToken cancellationToken = default)
     {
-        await using var connection = await GetConnectionAsync(ct);
+        await using var connection = await GetConnectionAsync(cancellationToken);
         var (sql, parameters) = BuildQuerySql(query, includeOrderBy: true, includeLimit: true);
 
         await using var command = new SqlCommand(sql, connection);
+
         command.Parameters.AddRange(parameters.ToArray());
 
-        await using var reader = await command.ExecuteReaderAsync(ct);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         var results = new List<CheckpointSummary>();
-        while (await reader.ReadAsync(ct))
+
+        while (await reader.ReadAsync(cancellationToken))
         {
+            var hyperParamsJson = reader.GetString(5);
+            var hyperParams = JsonSerializer.Deserialize<HyperParameters>(hyperParamsJson);
+
             results.Add(new CheckpointSummary
             {
                 ModelId = reader.GetGuid(0),
                 CurrentEpoch = reader.GetInt32(1),
                 LastTrainingLoss = (float)reader.GetDouble(2),
                 CreatedAt = reader.GetDateTime(3),
-                Tags = JsonSerializer.Deserialize<Dictionary<string, string>>(reader.GetString(4)) ?? new()
+                Tags = JsonSerializer.Deserialize<Dictionary<string, string>>(reader.GetString(4)) ?? new(),
+                HyperParams = hyperParams
             });
         }
 
@@ -219,12 +225,36 @@ internal class SqlServerModelStore : SqlServerStoreBase, IDbModelStore
         await tx.CommitAsync(cancellationToken);
     }
 
+    public async Task<CheckpointSummary?> GetCheckpointSummaryAsync(Guid modelId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await GetConnectionAsync(cancellationToken);
+        const string sql = @"
+        SELECT epoch, loss, created_at, hyper_params, tags
+        FROM ModelManifests
+        WHERE model_id = @id";
+        await using var command = new SqlCommand(sql, connection);
+        command.Parameters.AddWithValue("@id", modelId);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken)) return null;
+
+        return new CheckpointSummary
+        {
+            ModelId = modelId,
+            CurrentEpoch = reader.GetInt32(0),
+            LastTrainingLoss = (float)reader.GetDouble(1),
+            CreatedAt = reader.GetDateTime(2),
+            HyperParams = JsonSerializer.Deserialize<HyperParameters>(reader.GetString(3)),
+            Tags = JsonSerializer.Deserialize<Dictionary<string, string>>(reader.GetString(4)) ?? new()
+        };
+    }
+
     //------------- Private Methods -----------------//
 
     private (string Sql, List<SqlParameter> Parameters) BuildQuerySql(CheckpointQuery query, bool includeOrderBy = true, bool includeLimit = true)
     {
         var sql = new StringBuilder(@"
-        SELECT modelId, epoch, loss, createdAt, tags
+        SELECT modelId, epoch, loss, createdAt, tags, hyperParams
         FROM ModelManifests
         WHERE 1=1
     ");

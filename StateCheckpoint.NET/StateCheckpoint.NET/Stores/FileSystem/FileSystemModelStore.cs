@@ -5,44 +5,11 @@ using System.Runtime.CompilerServices;
 
 namespace StateCheckpoint.NET;
 
-internal class FileSystemModelStore : IFileSystemModelStore
+internal class FileSystemModelStore : FileSystemBase<CheckpointIndex>, IFileSystemModelStore
 {
-    private readonly string _rootPath;
-    private readonly FileSystemStoreOptions _options;
-    private readonly CheckpointIndex _index;
-    private readonly SemaphoreSlim _buildLock = new(1, 1);
-    private bool _indexLoaded;
-
-    public FileSystemModelStore(string rootPath, FileSystemStoreOptions? options = null)
+    public FileSystemModelStore(string rootPath, FileSystemStoreOptions? options = null): 
+        base(rootPath, options, indexFilePath => new CheckpointIndex(indexFilePath))
     {
-        _options = options ?? new FileSystemStoreOptions();
-        _rootPath = Path.Combine(rootPath, "models");
-
-        if (_options.ValidatePermissionsOnStartup)
-        {
-            if (!FileSystemHelper.TryValidateWriteAccess(_rootPath, out var error))
-            {
-                // If fallback is provided, update the root path
-                if (!string.IsNullOrWhiteSpace(_options.FallbackPath))
-                {
-                    _rootPath = Path.Combine(_options.FallbackPath, "models");
-
-                    Directory.CreateDirectory(_rootPath);
-                }
-                else
-                {
-                    throw error!;
-                }
-            }
-        }
-
-        // Still ensure the directory exists if required
-        else if (_options.EnsureDirectoryExists)
-                Directory.CreateDirectory(_rootPath);
-
-        var indexFilePath = Path.Combine(_rootPath, "_index.json");
-
-        _index = new CheckpointIndex(indexFilePath);
     }
 
     /// <summary>
@@ -83,6 +50,7 @@ internal class FileSystemModelStore : IFileSystemModelStore
             CurrentEpoch = checkpoint.CurrentEpoch,
             LastTrainingLoss = checkpoint.LastTrainingLoss,
             ModelId = checkpoint.ModelId,
+            HyperParams = checkpoint.HyperParams,
             Tags = checkpoint.Tags
         }, cancellationToken);
     }
@@ -181,46 +149,85 @@ internal class FileSystemModelStore : IFileSystemModelStore
         }
     }
 
-    private async Task EnsureIndexLoadedAsync(CancellationToken cancellationToken)
+    public async Task<CheckpointSummary?> GetCheckpointSummaryAsync(Guid modelId, CancellationToken cancellationToken = default)
     {
-        if (!_indexLoaded)
+        var manifest = await FileSystemHelper.LoadManifestOnlyAsync<ModelManifest>(
+            _rootPath, modelId, "manifest.json", cancellationToken);
+
+        if (manifest == null) return null;
+
+        return new CheckpointSummary
         {
-            await _buildLock.WaitAsync(cancellationToken);
-            try
-            {
-                if (_indexLoaded) return; // double-check
-
-                // Load the index from disk
-                await _index.LoadAsync(cancellationToken);
-
-                var entries = await _index.GetAllAsync(cancellationToken);
-
-                // If index is empty, rebuild it from manifests
-                if (!entries.Any())
-                {
-                    await _index.RebuildAsync(_rootPath, async (string rootPath, Guid id, CancellationToken ct) =>
-                    {
-                        var manifest = await FileSystemHelper.LoadManifestOnlyAsync<ModelManifest>(rootPath, id, "manifest.json", ct);
-
-                        if (manifest == null) return null;
-
-                        return new CheckpointSummary
-                        {
-                            ModelId = id,
-                            CurrentEpoch = manifest.CurrentEpoch,
-                            LastTrainingLoss = manifest.LastTrainingLoss,
-                            CreatedAt = manifest.CreatedAt,
-                            Tags = manifest.Tags ?? new()
-                        };
-                    }, cancellationToken);
-                }
-
-                _indexLoaded = true;
-            }
-            finally
-            {
-                _buildLock.Release();
-            }
-        }
+            ModelId = modelId,
+            CurrentEpoch = manifest.CurrentEpoch,
+            LastTrainingLoss = manifest.LastTrainingLoss,
+            CreatedAt = manifest.CreatedAt,
+            HyperParams = manifest.HyperParams,
+            Tags = manifest.Tags ?? new Dictionary<string, string>()
+        };
     }
+
+    private async Task EnsureIndexLoadedAsync(CancellationToken cancellationToken) => await EnsureIndexLoadedAsync(
+        () => _index.LoadAsync(cancellationToken),
+        () => _index.GetAllAsync(cancellationToken),
+        async path => await _index.RebuildAsync(_rootPath, async (string rootPath, Guid id, CancellationToken cancellationToken) =>
+        {
+            var manifest = await FileSystemHelper.LoadManifestOnlyAsync<ModelManifest>(rootPath, id, "manifest.json", cancellationToken);
+
+            if (manifest == null) return null;
+
+            return new CheckpointSummary
+            {
+                ModelId = id,
+                CurrentEpoch = manifest.CurrentEpoch,
+                LastTrainingLoss = manifest.LastTrainingLoss,
+                CreatedAt = manifest.CreatedAt,
+                Tags = manifest.Tags ?? new()
+            };
+        }, cancellationToken),
+        cancellationToken
+    );
+
+    //private async Task EnsureIndexLoadedAsync(CancellationToken cancellationToken)
+    //{
+    //    if (!_indexLoaded)
+    //    {
+    //        await _buildLock.WaitAsync(cancellationToken);
+    //        try
+    //        {
+    //            if (_indexLoaded) return; // double-check
+
+    //            // Load the index from disk
+    //            await _index.LoadAsync(cancellationToken);
+
+    //            var entries = await _index.GetAllAsync(cancellationToken);
+
+    //            // If index is empty, rebuild it from manifests
+    //            if (!entries.Any())
+    //            {
+    //                await _index.RebuildAsync(_rootPath, async (string rootPath, Guid id, CancellationToken cancellationToken) =>
+    //                {
+    //                    var manifest = await FileSystemHelper.LoadManifestOnlyAsync<ModelManifest>(rootPath, id, "manifest.json", cancellationToken);
+
+    //                    if (manifest == null) return null;
+
+    //                    return new CheckpointSummary
+    //                    {
+    //                        ModelId = id,
+    //                        CurrentEpoch = manifest.CurrentEpoch,
+    //                        LastTrainingLoss = manifest.LastTrainingLoss,
+    //                        CreatedAt = manifest.CreatedAt,
+    //                        Tags = manifest.Tags ?? new()
+    //                    };
+    //                }, cancellationToken);
+    //            }
+
+    //            _indexLoaded = true;
+    //        }
+    //        finally
+    //        {
+    //            _buildLock.Release();
+    //        }
+    //    }
+    //}
 }

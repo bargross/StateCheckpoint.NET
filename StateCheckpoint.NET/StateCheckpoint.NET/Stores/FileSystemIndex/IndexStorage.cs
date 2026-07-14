@@ -13,22 +13,22 @@ internal sealed class IndexStorage<T>
         _jsonOpts = jsonOpts ?? new JsonSerializerOptions { WriteIndented = true };
     }
 
-    public async Task<IReadOnlyList<T>> ReadAsync(CancellationToken ct = default)
+    public async Task<IReadOnlyList<T>> ReadAsync(CancellationToken cancellationToken = default)
     {
         if (!File.Exists(_filePath))
             return Array.Empty<T>();
 
-        var json = await File.ReadAllTextAsync(_filePath, ct);
+        var json = await File.ReadAllTextAsync(_filePath, cancellationToken);
 
         return JsonSerializer.Deserialize<List<T>>(json, _jsonOpts) ?? new List<T>();
     }
 
-    public async Task WriteAsync(IEnumerable<T> data, CancellationToken ct = default)
+    public async Task WriteAsync(IEnumerable<T> data, CancellationToken cancellationToken = default)
     {
         var json = JsonSerializer.Serialize(data, _jsonOpts);
         var tempPath = _filePath + ".tmp";
 
-        await File.WriteAllTextAsync(tempPath, json, ct);
+        await File.WriteAllTextAsync(tempPath, json, cancellationToken);
 
         File.Move(tempPath, _filePath, overwrite: true);
     }

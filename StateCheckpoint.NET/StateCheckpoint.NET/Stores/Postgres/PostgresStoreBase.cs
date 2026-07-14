@@ -34,9 +34,9 @@ internal abstract class PostgresStoreBase : IAsyncDisposable
     /// <summary>
     /// Gets an open PostgreSQL connection from the DataSource pool.
     /// </summary>
-    protected async Task<NpgsqlConnection> GetConnectionAsync(CancellationToken ct = default)
+    protected async Task<NpgsqlConnection> GetConnectionAsync(CancellationToken cancellationToken = default)
     {
-        return await _dataSource.OpenConnectionAsync(ct);
+        return await _dataSource.OpenConnectionAsync(cancellationToken);
     }
 
     /// <summary>

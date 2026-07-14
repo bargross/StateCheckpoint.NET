@@ -37,17 +37,17 @@ internal abstract class SqlServerStoreBase : IAsyncDisposable
     /// <summary>
     /// Gets an open SQL Server connection. Opens it lazily if not already open.
     /// </summary>
-    protected async Task<SqlConnection> GetConnectionAsync(CancellationToken ct = default)
+    protected async Task<SqlConnection> GetConnectionAsync(CancellationToken cancellationToken = default)
     {
         if (!_ownsConnection)
         {
             // External connection – ensure thread‑safe access
-            await _connectionLock.WaitAsync(ct);
+            await _connectionLock.WaitAsync(cancellationToken);
 
             try
             {
                 if (_connection!.State != ConnectionState.Open)
-                    await _connection.OpenAsync(ct);
+                    await _connection.OpenAsync(cancellationToken);
 
                 return _connection;
             }
@@ -60,7 +60,7 @@ internal abstract class SqlServerStoreBase : IAsyncDisposable
         // Owned connection – create a new one per call
         var connection = new SqlConnection(_connectionString!);
 
-        await connection.OpenAsync(ct);
+        await connection.OpenAsync(cancellationToken);
 
         return connection;
     }

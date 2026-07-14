@@ -255,18 +255,19 @@ internal class PostgresModelStore : PostgresStoreBase, IDbModelStore
         return modelIds;
     }
 
-    public async Task<List<CheckpointSummary>> QueryAsync(CheckpointQuery query, CancellationToken ct = default)
+    public async Task<List<CheckpointSummary>> QueryAsync(CheckpointQuery query, CancellationToken cancellationToken = default)
     {
-        await using var connection = await GetConnectionAsync(ct);
+        await using var connection = await GetConnectionAsync(cancellationToken);
+
         var (sql, parameters) = BuildQuerySql(query, includeOrderBy: true, includeLimit: true);
 
         await using var command = new NpgsqlCommand(sql, connection);
         command.Parameters.AddRange(parameters.ToArray());
 
-        await using var reader = await command.ExecuteReaderAsync(ct);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
 
         var results = new List<CheckpointSummary>();
-        while (await reader.ReadAsync(ct))
+        while (await reader.ReadAsync(cancellationToken))
         {
             results.Add(new CheckpointSummary
             {
@@ -283,18 +284,19 @@ internal class PostgresModelStore : PostgresStoreBase, IDbModelStore
 
     public async IAsyncEnumerable<CheckpointSummary> QueryStreamAsync(
         CheckpointQuery query,
-        [EnumeratorCancellation] CancellationToken ct = default)
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        await using var connection = await GetConnectionAsync(ct);
+        await using var connection = await GetConnectionAsync(cancellationToken);
         var (sql, parameters) = BuildQuerySql(query, includeOrderBy: true, includeLimit: true);
 
         await using var command = new NpgsqlCommand(sql, connection);
         command.Parameters.AddRange(parameters.ToArray());
 
-        await using var reader = await command.ExecuteReaderAsync(ct);
-        while (await reader.ReadAsync(ct))
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
         {
-            ct.ThrowIfCancellationRequested();
+            cancellationToken.ThrowIfCancellationRequested();
+
             yield return new CheckpointSummary
             {
                 ModelId = reader.GetGuid(0),
@@ -315,6 +317,33 @@ internal class PostgresModelStore : PostgresStoreBase, IDbModelStore
             await DeleteAsync(id, cancellationToken);
 
         await transaction.CommitAsync(cancellationToken);
+    }
+
+    public async Task<CheckpointSummary?> GetCheckpointSummaryAsync(Guid modelId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await GetConnectionAsync(cancellationToken);
+        const string sql = @"
+        SELECT m.epoch, m.loss, m.created_at, m.tags
+        FROM model_manifests m
+        JOIN model_blobs b ON m.model_id = b.model_id
+        WHERE m.model_id = @id";
+
+        await using var command = new NpgsqlCommand(sql, connection);
+        command.Parameters.AddWithValue("@id", modelId);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+
+        if (!await reader.ReadAsync(cancellationToken)) return null;
+
+        return new CheckpointSummary
+        {
+            ModelId = modelId,
+            CurrentEpoch = reader.GetInt32(0),
+            LastTrainingLoss = (float)reader.GetDouble(1),
+            CreatedAt = reader.GetDateTime(2),
+            HyperParams = JsonSerializer.Deserialize<HyperParameters>(reader.GetString(3)),
+            Tags = JsonSerializer.Deserialize<Dictionary<string, string>>(reader.GetString(3)) ?? new()
+        };
     }
 
     //--------- private methods -----------------------------------
@@ -383,10 +412,10 @@ internal class PostgresModelStore : PostgresStoreBase, IDbModelStore
     }
 
     private static async Task<byte[]> ReadLargeObjectAsync(
-    NpgsqlConnection connection,
-    uint objectId,
-    NpgsqlTransaction transaction,   // required – caller manages it
-    CancellationToken cancellationToken = default)
+        NpgsqlConnection connection,
+        uint objectId,
+        NpgsqlTransaction transaction,   // required – caller manages it
+        CancellationToken cancellationToken = default)
     {
         // All commands use the provided transaction – do NOT commit or dispose it here.
         await using var openCommand = new NpgsqlCommand(PostgresLargeObjectQueries.OpenRead, connection, transaction);

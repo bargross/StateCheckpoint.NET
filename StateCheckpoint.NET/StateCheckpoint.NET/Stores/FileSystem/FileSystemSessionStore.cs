@@ -4,49 +4,11 @@ using System.Runtime.CompilerServices;
 
 namespace StateCheckpoint.NET;
 
-internal class FileSystemSessionStore : IFileSystemSessionStore
+internal class FileSystemSessionStore : FileSystemBase<SessionIndex>, IFileSystemSessionStore
 {
-    private readonly string _rootPath;
-    private readonly FileSystemStoreOptions _options;
-    private readonly SessionIndex _index;
-    private bool _indexLoaded;
-    private readonly SemaphoreSlim _buildLock = new(1, 1);
-
-    public FileSystemSessionStore(string rootPath, FileSystemStoreOptions? options = null)
+    public FileSystemSessionStore(string rootPath, FileSystemStoreOptions? options = null) 
+        : base(rootPath, options, indexFilePath => new SessionIndex(indexFilePath))
     {
-        _options = options ?? new FileSystemStoreOptions();
-        _rootPath = Path.Combine(rootPath, "sessions");
-
-        if (_options.ValidatePermissionsOnStartup)
-        {
-            if (!FileSystemHelper.TryValidateWriteAccess(_rootPath, out var error))
-            {
-                // If fallback is provided, update the root path
-                if (!string.IsNullOrWhiteSpace(_options.FallbackPath))
-                {
-                    _rootPath = Path.Combine(_options.FallbackPath, "sessions");
-
-                    Directory.CreateDirectory(_rootPath);
-                }
-                else
-                {
-                    throw error!;
-                }
-            }
-        }
-        else
-        {
-            // Still ensure the directory exists if required
-            if (_options.EnsureDirectoryExists)
-            {
-                Directory.CreateDirectory(_rootPath);
-            }
-        }
-
-        // Index file path
-        var indexFilePath = Path.Combine(_rootPath, "_sessions_index.json");
-
-        _index = new SessionIndex(indexFilePath);
     }
 
     public async Task SaveAsync(SessionCheckpoint session, CancellationToken cancellationToken = default)
@@ -114,6 +76,12 @@ internal class FileSystemSessionStore : IFileSystemSessionStore
         await _index.RemoveAsync(sessionId, cancellationToken);
     }
 
+    public async Task DeleteManyAsync(IEnumerable<Guid> sessionIds, CancellationToken cancellationToken = default)
+    {
+        foreach (var id in sessionIds)
+            await DeleteAsync(id, cancellationToken);
+    }
+
     public async Task<List<Guid>> ListAsync(string? tagKey = null, string? tagValue = null, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(tagKey) || string.IsNullOrWhiteSpace(tagValue))
@@ -146,7 +114,7 @@ internal class FileSystemSessionStore : IFileSystemSessionStore
             cancellationToken.ThrowIfCancellationRequested();
 
             // Apply filters
-            if (!string.IsNullOrEmpty(query.ModelFingerprint) && summary.ModelFingerprint != query.ModelFingerprint) continue;
+            if (!string.IsNullOrWhiteSpace(query.ModelFingerprint) && summary.ModelFingerprint != query.ModelFingerprint) continue;
             if (query.UpdatedAfter.HasValue && summary.LastUpdated < query.UpdatedAfter.Value) continue;
             if (query.UpdatedBefore.HasValue && summary.LastUpdated > query.UpdatedBefore.Value) continue;
             if (query.Tags != null && query.Tags.Count > 0 && !TagsHelper.TagsMatch(summary.Tags, query.Tags)) continue;
@@ -155,45 +123,39 @@ internal class FileSystemSessionStore : IFileSystemSessionStore
         }
     }
 
-    //---------------- Private Methods ----------------//
-
-    // Ensure the index is loaded into memory (lazy)
-    private async Task EnsureIndexLoadedAsync(CancellationToken cancellationToken)
+    public async Task<SessionSummary?> GetSessionSummaryAsync(Guid sessionId, CancellationToken cancellationToken = default)
     {
-        if (!_indexLoaded)
+        var manifest = await FileSystemHelper.LoadManifestOnlyAsync<SessionManifest>(
+            _rootPath, sessionId, "meta.json", cancellationToken);
+
+        if (manifest == null) return null;
+
+        return new SessionSummary
         {
-            await _buildLock.WaitAsync(cancellationToken);
-            try
-            {
-                if (_indexLoaded) return;
-
-                await _index.LoadAsync(cancellationToken);
-
-                var entries = await _index.GetAllAsync(cancellationToken);
-                if (!entries.Any())
-                {
-                    await _index.RebuildAsync(_rootPath, async (rootPath, id, ct) =>
-                    {
-                        var manifest = await FileSystemHelper
-                            .LoadManifestOnlyAsync<SessionManifest>(rootPath, id, "meta.json", ct);
-
-                        if (manifest == null) return null;
-                        
-                        return new SessionSummary
-                        {
-                            SessionId = id,
-                            ModelFingerprint = manifest.ModelFingerprint,
-                            LastUpdated = manifest.LastUpdated,
-                            Tags = manifest.Tags ?? new Dictionary<string, string>()
-                        };
-                    }, cancellationToken);
-                }
-                _indexLoaded = true;
-            }
-            finally
-            {
-                _buildLock.Release();
-            }
-        }
+            SessionId = sessionId,
+            ModelFingerprint = manifest.ModelFingerprint,
+            LastUpdated = manifest.LastUpdated,
+            Tags = manifest.Tags ?? new Dictionary<string, string>()
+        };
     }
+
+    private async Task EnsureIndexLoadedAsync(CancellationToken cancellationToken) => await EnsureIndexLoadedAsync(
+        () => _index.LoadAsync(cancellationToken),
+        () => _index.GetAllAsync(cancellationToken),
+        async path => await _index.RebuildAsync(_rootPath, async (string rootPath, Guid id, CancellationToken _) =>
+        {
+            var manifest = await FileSystemHelper.LoadManifestOnlyAsync<SessionManifest>(rootPath, id, "meta.json", cancellationToken);
+
+            if (manifest == null) return null;
+
+            return new SessionSummary
+            {
+                SessionId = id,
+                ModelFingerprint = manifest.ModelFingerprint,
+                LastUpdated = manifest.LastUpdated,
+                Tags = manifest.Tags ?? new Dictionary<string, string>()
+            };
+        }, cancellationToken),
+        cancellationToken
+    );
 }

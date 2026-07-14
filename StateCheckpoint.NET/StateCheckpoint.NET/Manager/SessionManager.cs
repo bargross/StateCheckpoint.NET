@@ -10,6 +10,7 @@ public class SessionManager : IAsyncDisposable
 {
     private readonly ISessionStore _store;
     private readonly BackgroundSaver<SessionCheckpoint>? _backgroundSaver;
+    private readonly RetentionPolicy _retentionPolicy;
 
     /// <summary>
     /// Initializes the manager with a custom storage provider.
@@ -17,11 +18,9 @@ public class SessionManager : IAsyncDisposable
     /// <param name="store">Any implementation of ISessionStore (FileSystem, PostgreSQL, etc.)</param>
     public SessionManager(StorageOptions storageOptions)
     {
-        if (storageOptions.StoreType == StoreType.SqlDb && string.IsNullOrWhiteSpace(storageOptions.DbStoreOptions?.ConnectionString))
-            throw new InvalidOperationException("ConnectionString is required when StoreType is SqlDb.");
+        storageOptions.Validate();
 
-        if (storageOptions.StoreType == StoreType.Local && string.IsNullOrWhiteSpace(storageOptions.FileSystemStoreOptions?.RootPath))
-            throw new InvalidOperationException("RootPath is required when StoreType is Local.");
+        _retentionPolicy = storageOptions.RetentionPolicy ?? new RetentionPolicy();
 
         _store = StoreSessionFactory.Create(storageOptions);
 
@@ -63,6 +62,9 @@ public class SessionManager : IAsyncDisposable
         }
 
         await _store.SaveAsync(sessionCheckpoint, cancellationToken);
+
+        if (_retentionPolicy != null)
+            await this.InternalApplyRetentionPolicyAsync(cancellationToken);
 
         return sessionCheckpoint.SessionId;
     }
@@ -113,6 +115,16 @@ public class SessionManager : IAsyncDisposable
         => _store.QueryStreamAsync(query, cancellationToken);
 
     /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="baseLineId"></param>
+    /// <param name="CandidateId"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    public async Task<SessionDiff> CompareAsync(Guid baseLineId, Guid CandidateId, CancellationToken cancellationToken = default)
+        => await this.InternalCompareAsync(baseLineId, CandidateId, cancellationToken);
+
+    /// <summary>
     /// Disposes the manager and ensures the background saver finishes all pending operations.
     /// <para>
     /// <strong>IMPORTANT:</strong> You MUST call this method when background saves are enabled.
@@ -129,5 +141,17 @@ public class SessionManager : IAsyncDisposable
 
         if (_store is IAsyncDisposable asyncDisposable)
             await asyncDisposable.DisposeAsync();
+    }
+
+    //----------- Internal -------------//
+
+    internal RetentionPolicy RetentionPolicy
+    {
+        get { return _retentionPolicy; }
+    }
+
+    internal ISessionStore Store
+    {
+        get { return _store; }
     }
 }

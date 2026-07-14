@@ -32,8 +32,8 @@ public class SqlServerStoreBaseTests
         public TestableSqlServerStore(string connectionString) : base(connectionString) { }
         public TestableSqlServerStore(SqlConnection connection) : base(connection) { }
 
-        public new async Task<SqlConnection> GetConnectionAsync(CancellationToken ct = default)
-            => await base.GetConnectionAsync(ct);
+        public new async Task<SqlConnection> GetConnectionAsync(CancellationToken cancellationToken = default)
+            => await base.GetConnectionAsync(cancellationToken);
     }
 
     [SkippableFact]

@@ -103,6 +103,17 @@ internal class SqlServerSessionStore : SqlServerStoreBase, IDbSessionStore
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    public async Task DeleteManyAsync(IEnumerable<Guid> sesionIds, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await GetConnectionAsync(cancellationToken);
+        await using var tx = await connection.BeginTransactionAsync(cancellationToken);
+
+        foreach (var id in sesionIds)
+            await DeleteAsync(id, cancellationToken);
+
+        await tx.CommitAsync(cancellationToken);
+    }
+
     /// <summary>
     /// Gets a list of all session ids
     /// </summary>
@@ -143,17 +154,17 @@ internal class SqlServerSessionStore : SqlServerStoreBase, IDbSessionStore
         }
     }
 
-    public async Task<List<SessionSummary>> QueryAsync(SessionQuery query, CancellationToken ct = default)
+    public async Task<List<SessionSummary>> QueryAsync(SessionQuery query, CancellationToken cancellationToken = default)
     {
-        await using var connection = await GetConnectionAsync(ct);
+        await using var connection = await GetConnectionAsync(cancellationToken);
         var (sql, parameters) = BuildQuerySql(query, includeOrderBy: true, includeLimit: true);
 
         await using var command = new SqlCommand(sql, connection);
         command.Parameters.AddRange(parameters.ToArray());
 
-        await using var reader = await command.ExecuteReaderAsync(ct);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         var results = new List<SessionSummary>();
-        while (await reader.ReadAsync(ct))
+        while (await reader.ReadAsync(cancellationToken))
         {
             results.Add(new SessionSummary
             {
@@ -168,18 +179,19 @@ internal class SqlServerSessionStore : SqlServerStoreBase, IDbSessionStore
 
     public async IAsyncEnumerable<SessionSummary> QueryStreamAsync(
         SessionQuery query,
-        [EnumeratorCancellation] CancellationToken ct = default)
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        await using var connection = await GetConnectionAsync(ct);
+        await using var connection = await GetConnectionAsync(cancellationToken);
         var (sql, parameters) = BuildQuerySql(query, includeOrderBy: true, includeLimit: true);
 
         await using var command = new SqlCommand(sql, connection);
         command.Parameters.AddRange(parameters.ToArray());
 
-        await using var reader = await command.ExecuteReaderAsync(ct);
-        while (await reader.ReadAsync(ct))
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
         {
-            ct.ThrowIfCancellationRequested();
+            cancellationToken.ThrowIfCancellationRequested();
+
             yield return new SessionSummary
             {
                 SessionId = reader.GetGuid(0),
@@ -188,6 +200,30 @@ internal class SqlServerSessionStore : SqlServerStoreBase, IDbSessionStore
                 Tags = JsonSerializer.Deserialize<Dictionary<string, string>>(reader.GetString(3)) ?? new()
             };
         }
+    }
+
+    public async Task<SessionSummary?> GetSessionSummaryAsync(Guid sessionId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await GetConnectionAsync(cancellationToken);
+        const string sql = @"
+        SELECT model_fingerprint, last_updated, tags
+        FROM InferenceSessions
+        WHERE session_id = @id";
+
+        await using var command = new SqlCommand(sql, connection);
+
+        command.Parameters.AddWithValue("@id", sessionId);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken)) return null;
+
+        return new SessionSummary
+        {
+            SessionId = sessionId,
+            ModelFingerprint = reader.GetString(0),
+            LastUpdated = reader.GetDateTime(1),
+            Tags = JsonSerializer.Deserialize<Dictionary<string, string>>(reader.GetString(2)) ?? new()
+        };
     }
 
     //------------ Private Methods --------------//

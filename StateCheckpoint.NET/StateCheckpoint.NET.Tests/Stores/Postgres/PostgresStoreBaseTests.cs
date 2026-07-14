@@ -12,8 +12,8 @@ public class PostgresStoreBaseTests
         public TestablePostgresStore(string connectionString) : base(connectionString) { }
         public TestablePostgresStore(NpgsqlDataSource dataSource) : base(dataSource) { }
 
-        public new async Task<NpgsqlConnection> GetConnectionAsync(CancellationToken ct = default)
-            => await base.GetConnectionAsync(ct);
+        public new async Task<NpgsqlConnection> GetConnectionAsync(CancellationToken cancellationToken = default)
+            => await base.GetConnectionAsync(cancellationToken);
     }
 
     private const string DummyConnectionString = "Host=localhost;Database=dummy";

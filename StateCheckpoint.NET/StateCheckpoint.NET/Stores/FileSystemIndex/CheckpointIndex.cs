@@ -23,12 +23,12 @@ internal sealed class CheckpointIndex
     /// Loads the index from storage; if no file exists, starts with an empty list.
     /// Must be called before any other operations.
     /// </summary>
-    public async Task LoadAsync(CancellationToken ct = default)
+    public async Task LoadAsync(CancellationToken cancellationToken = default)
     {
-        await _lock.WaitAsync(ct);
+        await _lock.WaitAsync(cancellationToken);
         try
         {
-            var data = await _storage.ReadAsync(ct);
+            var data = await _storage.ReadAsync(cancellationToken);
             _items = data.ToList();
         }
         finally
@@ -37,9 +37,9 @@ internal sealed class CheckpointIndex
         }
     }
 
-    public async Task AddOrUpdateAsync(CheckpointSummary summary, CancellationToken ct = default)
+    public async Task AddOrUpdateAsync(CheckpointSummary summary, CancellationToken cancellationToken = default)
     {
-        await _lock.WaitAsync(ct);
+        await _lock.WaitAsync(cancellationToken);
         try
         {
             var existing = _items.FirstOrDefault(e => e.ModelId == summary.ModelId);
@@ -54,7 +54,7 @@ internal sealed class CheckpointIndex
             {
                 _items.Add(summary);
             }
-            await _storage.WriteAsync(_items, ct);
+            await _storage.WriteAsync(_items, cancellationToken);
         }
         finally
         {
@@ -62,14 +62,14 @@ internal sealed class CheckpointIndex
         }
     }
 
-    public async Task RemoveAsync(Guid modelId, CancellationToken ct = default)
+    public async Task RemoveAsync(Guid modelId, CancellationToken cancellationToken = default)
     {
-        await _lock.WaitAsync(ct);
+        await _lock.WaitAsync(cancellationToken);
         try
         {
             var removed = _items.RemoveAll(e => e.ModelId == modelId);
             if (removed > 0)
-                await _storage.WriteAsync(_items, ct);
+                await _storage.WriteAsync(_items, cancellationToken);
         }
         finally
         {

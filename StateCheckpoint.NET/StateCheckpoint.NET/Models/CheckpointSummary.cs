@@ -6,5 +6,6 @@ public class CheckpointSummary
     public int CurrentEpoch { get; set; }
     public float LastTrainingLoss { get; set; }
     public DateTime CreatedAt { get; set; }
+    public HyperParameters? HyperParams { get; set; }
     public Dictionary<string, string> Tags { get; set; } = new();
 }
