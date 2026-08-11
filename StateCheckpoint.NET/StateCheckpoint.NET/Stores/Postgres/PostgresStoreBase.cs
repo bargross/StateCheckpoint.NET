@@ -1,12 +1,12 @@
 ﻿using Npgsql;
 
-namespace StateCheckpoint.NET.Stores;
+namespace StateCheckpoint.NET;
 
 /// <summary>
 /// Abstract base class for PostgreSQL stores.
 /// Supports connection string OR an externally managed NpgsqlDataSource.
 /// </summary>
-public abstract class PostgresStoreBase : IAsyncDisposable
+internal abstract class PostgresStoreBase : IAsyncDisposable
 {
     private readonly NpgsqlDataSource _dataSource;
     private readonly bool _ownsDataSource;
@@ -34,9 +34,9 @@ public abstract class PostgresStoreBase : IAsyncDisposable
     /// <summary>
     /// Gets an open PostgreSQL connection from the DataSource pool.
     /// </summary>
-    protected async Task<NpgsqlConnection> GetConnectionAsync(CancellationToken ct = default)
+    protected async Task<NpgsqlConnection> GetConnectionAsync(CancellationToken cancellationToken = default)
     {
-        return await _dataSource.OpenConnectionAsync(ct);
+        return await _dataSource.OpenConnectionAsync(cancellationToken);
     }
 
     /// <summary>

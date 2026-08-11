@@ -1,15 +1,17 @@
-﻿using StateCheckpoint.NET.Models;
-using Microsoft.Data.SqlClient;
+﻿using Microsoft.Data.SqlClient;
+using Npgsql;
+using StateCheckpoint.NET.Models;
+using System.Runtime.CompilerServices;
+using System.Text;
 using System.Text.Json;
 
-namespace StateCheckpoint.NET.Stores;
+namespace StateCheckpoint.NET;
 
-public class SqlServerSessionStore : SqlServerStoreBase, ISessionStore
+internal class SqlServerSessionStore : SqlServerStoreBase, IDbSessionStore
 {
     private static readonly JsonSerializerOptions _jsonOpts = new() { WriteIndented = false };
 
     public SqlServerSessionStore(string connectionString) : base(connectionString) { }
-    public SqlServerSessionStore(SqlConnection connection) : base(connection) { }
 
     /// <summary>
     /// Ensures schema is created
@@ -18,7 +20,7 @@ public class SqlServerSessionStore : SqlServerStoreBase, ISessionStore
     /// <returns></returns>
     public async Task EnsureSchemaAsync(CancellationToken cancellationToken = default)
     {
-        using var connection = await GetConnectionAsync(cancellationToken);
+        await using var connection = await GetConnectionAsync(cancellationToken);
 
         await using var command = new SqlCommand(SqlServerSessionQueries.EnsureSessionSchema, connection);
 
@@ -33,7 +35,7 @@ public class SqlServerSessionStore : SqlServerStoreBase, ISessionStore
     /// <returns>Session id created for the given session</returns>
     public async Task SaveAsync(SessionCheckpoint session, CancellationToken cancellationToken = default)
     {
-        using var connection = await GetConnectionAsync(cancellationToken);
+        await using var connection = await GetConnectionAsync(cancellationToken);
 
         await using var tx = await connection.BeginTransactionAsync(cancellationToken);
 
@@ -62,7 +64,7 @@ public class SqlServerSessionStore : SqlServerStoreBase, ISessionStore
     /// <returns></returns>
     public async Task<SessionCheckpoint?> LoadAsync(Guid sessionId, CancellationToken cancellationToken = default)
     {
-        using var connection = await GetConnectionAsync(cancellationToken);
+        await using var connection = await GetConnectionAsync(cancellationToken);
 
         await using var command = new SqlCommand(SqlServerSessionQueries.SelectInferenceSession, connection);
 
@@ -92,13 +94,41 @@ public class SqlServerSessionStore : SqlServerStoreBase, ISessionStore
     /// <returns></returns>
     public async Task DeleteAsync(Guid sessionId, CancellationToken cancellationToken = default)
     {
-        using var connection = await GetConnectionAsync(cancellationToken);
+        await using var connection = await GetConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
-        await using var command = new SqlCommand(SqlServerSessionQueries.DeleteInferenceSession, connection);
+        try
+        {
+            await DeleteInternalAsync(connection, transaction as SqlTransaction, sessionId, cancellationToken);
 
-        command.Parameters.AddWithValue("@Id", sessionId);
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch
+        {
+            await transaction.RollbackAsync(cancellationToken);
 
-        await command.ExecuteNonQueryAsync(cancellationToken);
+            throw;
+        }
+    }
+
+    public async Task DeleteManyAsync(IEnumerable<Guid> sessionIds, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await GetConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        try
+        {
+            foreach (var id in sessionIds)
+                await DeleteInternalAsync(connection, transaction as SqlTransaction, id, cancellationToken);
+            
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch
+        {
+            await transaction.RollbackAsync(cancellationToken);
+
+            throw;
+        }
     }
 
     /// <summary>
@@ -110,7 +140,7 @@ public class SqlServerSessionStore : SqlServerStoreBase, ISessionStore
     /// <returns></returns>
     public async Task<List<Guid>> ListAsync(string? tagKey = null, string? tagValue = null, CancellationToken cancellationToken = default)
     {
-        using var connection = await GetConnectionAsync(cancellationToken);
+        await using var connection = await GetConnectionAsync(cancellationToken);
 
         string sql;
         SqlCommand command;
@@ -139,5 +169,149 @@ public class SqlServerSessionStore : SqlServerStoreBase, ISessionStore
 
             return list;
         }
+    }
+
+    public async Task<List<SessionSummary>> QueryAsync(SessionQuery query, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await GetConnectionAsync(cancellationToken);
+        var (sql, parameters) = BuildQuerySql(query, includeOrderBy: true, includeLimit: true);
+
+        await using var command = new SqlCommand(sql, connection);
+        command.Parameters.AddRange(parameters.ToArray());
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var results = new List<SessionSummary>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            results.Add(new SessionSummary
+            {
+                SessionId = reader.GetGuid(0),
+                ModelFingerprint = reader.GetString(1),
+                LastUpdated = reader.GetDateTime(2),
+                Tags = JsonSerializer.Deserialize<Dictionary<string, string>>(reader.GetString(3)) ?? new()
+            });
+        }
+        return results;
+    }
+
+    public async IAsyncEnumerable<SessionSummary> QueryStreamAsync(
+        SessionQuery query,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        await using var connection = await GetConnectionAsync(cancellationToken);
+        var (sql, parameters) = BuildQuerySql(query, includeOrderBy: true, includeLimit: true);
+
+        await using var command = new SqlCommand(sql, connection);
+        command.Parameters.AddRange(parameters.ToArray());
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            yield return new SessionSummary
+            {
+                SessionId = reader.GetGuid(0),
+                ModelFingerprint = reader.GetString(1),
+                LastUpdated = reader.GetDateTime(2),
+                Tags = JsonSerializer.Deserialize<Dictionary<string, string>>(reader.GetString(3)) ?? new()
+            };
+        }
+    }
+
+    public async Task<SessionSummary?> GetSessionSummaryAsync(Guid sessionId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await GetConnectionAsync(cancellationToken);
+        const string sql = @"
+        SELECT model_fingerprint, last_updated, tags
+        FROM InferenceSessions
+        WHERE session_id = @id";
+
+        await using var command = new SqlCommand(sql, connection);
+
+        command.Parameters.AddWithValue("@id", sessionId);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken)) return null;
+
+        return new SessionSummary
+        {
+            SessionId = sessionId,
+            ModelFingerprint = reader.GetString(0),
+            LastUpdated = reader.GetDateTime(1),
+            Tags = JsonSerializer.Deserialize<Dictionary<string, string>>(reader.GetString(2)) ?? new()
+        };
+    }
+
+    //------------ Private Methods --------------//
+
+    private async Task DeleteInternalAsync(
+        SqlConnection connection,
+        SqlTransaction transaction,
+        Guid sessionId,
+        CancellationToken cancellationToken)
+    {
+        await using var command = new SqlCommand(
+            "DELETE FROM inference_sessions WHERE session_id = @id",
+            connection,
+            transaction);
+
+        command.Parameters.AddWithValue("@id", sessionId);
+
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private (string Sql, List<SqlParameter> Parameters) BuildQuerySql(SessionQuery query, bool includeOrderBy = true, bool includeLimit = true)
+    {
+        var sql = new StringBuilder(@"
+            SELECT session_id, model_fingerprint, last_updated, tags
+            FROM InferenceSessions
+            WHERE 1=1
+        ");
+
+        var parameters = new List<SqlParameter>();
+
+        if (!string.IsNullOrWhiteSpace(query.ModelFingerprint))
+        {
+            sql.Append(" AND model_fingerprint = @ModelFingerprint");
+            parameters.Add(new SqlParameter("@ModelFingerprint", query.ModelFingerprint));
+        }
+        if (query.UpdatedAfter.HasValue)
+        {
+            sql.Append(" AND last_updated >= @UpdatedAfter");
+            parameters.Add(new SqlParameter("@UpdatedAfter", query.UpdatedAfter.Value));
+        }
+        if (query.UpdatedBefore.HasValue)
+        {
+            sql.Append(" AND last_updated <= @UpdatedBefore");
+            parameters.Add(new SqlParameter("@UpdatedBefore", query.UpdatedBefore.Value));
+        }
+        if (query.Tags != null && query.Tags.Count > 0)
+        {
+            foreach (var pair in query.Tags)
+            {
+                var valParam = $"@tagVal_{pair.Key}";
+                sql.Append($" AND JSON_VALUE(tags, '$.{pair.Key}') = {valParam}");
+                parameters.Add(new SqlParameter(valParam, pair.Value));
+            }
+        }
+
+        if (includeOrderBy)
+        {
+            var orderColumn = query.OrderBy switch
+            {
+                SessionSortField.LastUpdated => "last_updated",
+                _ => "last_updated"
+            };
+            sql.Append($" ORDER BY {orderColumn} {(query.Descending ? "DESC" : "ASC")}");
+        }
+
+        if (includeLimit && query.Limit.HasValue && query.Limit.Value > 0)
+        {
+            sql.Append(" OFFSET 0 ROWS FETCH NEXT @Limit ROWS ONLY");
+            parameters.Add(new SqlParameter("@Limit", query.Limit.Value));
+        }
+
+        return (sql.ToString(), parameters);
     }
 }

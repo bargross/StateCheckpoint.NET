@@ -1,5 +1,8 @@
 ﻿namespace StateCheckpoint.NET.Settings;
 
+/// <summary>
+/// 
+/// </summary>
 public class BackgroundSaveOptions
 {
     /// <summary>

@@ -1,13 +1,13 @@
-﻿using StateCheckpoint.NET.Stores;
-using Microsoft.Data.SqlClient;
+﻿using Microsoft.Data.SqlClient;
 
 namespace StateCheckpoint.NET.Tests.Stores.SqlServer;
 
 public abstract class SqlServerTestBase : IAsyncLifetime
 {
-    protected SqlServerModelStore ModelStore { get; private set; } = null!;
-    protected SqlServerSessionStore SessionStore { get; private set; } = null!;
+    internal SqlServerModelStore ModelStore { get; private set; } = null!;
+    internal SqlServerSessionStore SessionStore { get; private set; } = null!;
     private string _connectionString = string.Empty;
+    private bool _disposed;
 
     public async Task InitializeAsync()
     {
@@ -15,7 +15,7 @@ public abstract class SqlServerTestBase : IAsyncLifetime
 
         _connectionString = connectionString;
 
-        await ClearTablesAsync();
+        await CleanupAsync();
 
         ModelStore = new SqlServerModelStore(connectionString);
         await ModelStore.EnsureSchemaAsync();
@@ -24,7 +24,7 @@ public abstract class SqlServerTestBase : IAsyncLifetime
         await SessionStore.EnsureSchemaAsync();
     }
 
-    private async Task ClearTablesAsync()
+    protected virtual async Task CleanupAsync()
     {
         try
         {
@@ -32,38 +32,32 @@ public abstract class SqlServerTestBase : IAsyncLifetime
 
             await connection.OpenAsync();
 
-            // SQL Server truncate order: child tables first to avoid FK violations.
-            // ModelBlobs references ModelManifests, so truncate it first.
             await using var command = new SqlCommand(
-                "TRUNCATE TABLE ModelBlobs; TRUNCATE TABLE ModelManifests; TRUNCATE TABLE InferenceSessions;",
+                "TRUNCATE TABLE ModelManifests; TRUNCATE TABLE ModelBlobs; TRUNCATE TABLE InferenceSessions;",
                 connection);
 
             await command.ExecuteNonQueryAsync();
         }
-        catch (Exception)
+        catch
         {
-            // Ignore if tables don't exist yet.
+            // Ignore if tables don't exist.
         }
     }
 
-
     public async Task DisposeAsync()
     {
+        if (_disposed) return;
+
         try
         {
-            await using var connection = new SqlConnection(_connectionString);
+            await CleanupAsync();
 
-            await connection.OpenAsync();
-
-            await using var command = new SqlCommand(
-                "TRUNCATE TABLE ModelManifests, ModelBlobs, InferenceSessions;",
-                connection);
-
-            await command.ExecuteNonQueryAsync();
+            _disposed = true;
         }
-        catch (Exception)
+        catch
         {
-            // Ignore if tables don't exist.
+            Console.WriteLine("err");
+            // Ignore exceptions during cleanup to prevent test runner crash.
         }
     }
 }

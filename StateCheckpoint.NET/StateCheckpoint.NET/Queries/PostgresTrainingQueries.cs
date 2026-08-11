@@ -1,4 +1,4 @@
-﻿namespace StateCheckpoint.NET.Stores;
+﻿namespace StateCheckpoint.NET;
 
 /// <summary>
 /// PostgreSQL queries specific to the Training (Model) domain.

@@ -1,11 +1,13 @@
-﻿using StateCheckpoint.NET.Models;
-using Npgsql;
+﻿using Npgsql;
 using NpgsqlTypes;
+using StateCheckpoint.NET.Models;
+using System.Runtime.CompilerServices;
+using System.Text;
 using System.Text.Json;
 
-namespace StateCheckpoint.NET.Stores;
+namespace StateCheckpoint.NET;
 
-public class PostgresModelStore : PostgresStoreBase, IModelStore
+internal class PostgresModelStore : PostgresStoreBase, IDbModelStore
 {
     private static readonly JsonSerializerOptions _jsonOpts = new() { WriteIndented = false };
 
@@ -181,38 +183,35 @@ public class PostgresModelStore : PostgresStoreBase, IModelStore
     public async Task DeleteAsync(Guid modelId, CancellationToken cancellationToken = default)
     {
         await using var connection = await GetConnectionAsync(cancellationToken);
-
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
         try
         {
-            await using var selectCommand = new NpgsqlCommand(PostgresTrainingQueries.SelectModelBlobOids, connection, transaction);
-
-            selectCommand.Parameters.AddWithValue("@id", modelId);
-
-            await using var dataReader = await selectCommand.ExecuteReaderAsync(cancellationToken);
-
-            if (await dataReader.ReadAsync(cancellationToken))
-            {
-                uint weightOid = dataReader.GetFieldValue<uint>(0);
-                uint optimizerOid = dataReader.GetFieldValue<uint>(1);
-                await dataReader.CloseAsync();
-
-                await UnlinkLargeObjectAsync(connection, transaction, weightOid, cancellationToken);
-                await UnlinkLargeObjectAsync(connection, transaction, optimizerOid, cancellationToken);
-            }
-            else await dataReader.CloseAsync();
-
-            await using var deleteCommand = new NpgsqlCommand(PostgresTrainingQueries.DeleteModelManifest, connection, transaction);
-            deleteCommand.Parameters.AddWithValue("@id", modelId);
-            await deleteCommand.ExecuteNonQueryAsync(cancellationToken);
-
+            await DeleteInternalAsync(connection, transaction, modelId, cancellationToken);
             await transaction.CommitAsync(cancellationToken);
         }
         catch
         {
             await transaction.RollbackAsync(cancellationToken);
+            throw;
+        }
+    }
 
+    public async Task DeleteManyAsync(IEnumerable<Guid> modelIds, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await GetConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        try
+        {
+            foreach (var id in modelIds)
+            {
+                await DeleteInternalAsync(connection, transaction, id, cancellationToken);
+            }
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch
+        {
+            await transaction.RollbackAsync(cancellationToken);
             throw;
         }
     }
@@ -251,6 +250,86 @@ public class PostgresModelStore : PostgresStoreBase, IModelStore
             modelIds.Add(dataReader.GetGuid(0));
 
         return modelIds;
+    }
+
+    public async Task<List<CheckpointSummary>> QueryAsync(CheckpointQuery query, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await GetConnectionAsync(cancellationToken);
+
+        var (sql, parameters) = BuildQuerySql(query, includeOrderBy: true, includeLimit: true);
+
+        await using var command = new NpgsqlCommand(sql, connection);
+        command.Parameters.AddRange(parameters.ToArray());
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+
+        var results = new List<CheckpointSummary>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            results.Add(new CheckpointSummary
+            {
+                ModelId = reader.GetGuid(0),
+                CurrentEpoch = reader.GetInt32(1),
+                LastTrainingLoss = (float)reader.GetDouble(2),
+                CreatedAt = reader.GetDateTime(3),
+                Tags = JsonSerializer.Deserialize<Dictionary<string, string>>(reader.GetString(4)) ?? new()
+            });
+        }
+
+        return results;
+    }
+
+    public async IAsyncEnumerable<CheckpointSummary> QueryStreamAsync(
+        CheckpointQuery query,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        await using var connection = await GetConnectionAsync(cancellationToken);
+        var (sql, parameters) = BuildQuerySql(query, includeOrderBy: true, includeLimit: true);
+
+        await using var command = new NpgsqlCommand(sql, connection);
+        command.Parameters.AddRange(parameters.ToArray());
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            yield return new CheckpointSummary
+            {
+                ModelId = reader.GetGuid(0),
+                CurrentEpoch = reader.GetInt32(1),
+                LastTrainingLoss = (float)reader.GetDouble(2),
+                CreatedAt = reader.GetDateTime(3),
+                Tags = JsonSerializer.Deserialize<Dictionary<string, string>>(reader.GetString(4)) ?? new()
+            };
+        }
+    }
+
+    public async Task<CheckpointSummary?> GetCheckpointSummaryAsync(Guid modelId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await GetConnectionAsync(cancellationToken);
+        const string sql = @"
+        SELECT m.epoch, m.loss, m.created_at, m.tags, m.hyper_params
+        FROM model_manifests m
+        JOIN model_blobs b ON m.model_id = b.model_id
+        WHERE m.model_id = @id";
+
+        await using var command = new NpgsqlCommand(sql, connection);
+        command.Parameters.AddWithValue("@id", modelId);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+
+        if (!await reader.ReadAsync(cancellationToken)) return null;
+
+        return new CheckpointSummary
+        {
+            ModelId = modelId,
+            CurrentEpoch = reader.GetInt32(0),
+            LastTrainingLoss = (float)reader.GetDouble(1),
+            CreatedAt = reader.GetDateTime(2),
+            HyperParams = JsonSerializer.Deserialize<HyperParameters>(reader.GetString(3)),
+            Tags = JsonSerializer.Deserialize<Dictionary<string, string>>(reader.GetString(3)) ?? new()
+        };
     }
 
     //--------- private methods -----------------------------------
@@ -319,10 +398,10 @@ public class PostgresModelStore : PostgresStoreBase, IModelStore
     }
 
     private static async Task<byte[]> ReadLargeObjectAsync(
-    NpgsqlConnection connection,
-    uint objectId,
-    NpgsqlTransaction transaction,   // required – caller manages it
-    CancellationToken cancellationToken = default)
+        NpgsqlConnection connection,
+        uint objectId,
+        NpgsqlTransaction transaction,   // required – caller manages it
+        CancellationToken cancellationToken = default)
     {
         // All commands use the provided transaction – do NOT commit or dispose it here.
         await using var openCommand = new NpgsqlCommand(PostgresLargeObjectQueries.OpenRead, connection, transaction);
@@ -364,5 +443,111 @@ public class PostgresModelStore : PostgresStoreBase, IModelStore
         }
 
         return memoryStream.ToArray();
+    }
+
+    private async Task DeleteInternalAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        Guid modelId,
+        CancellationToken cancellationToken)
+    {
+        // 1. Get OIDs
+        await using var selectCommand = new NpgsqlCommand(PostgresTrainingQueries.SelectModelBlobOids, connection, transaction);
+        selectCommand.Parameters.AddWithValue("@id", modelId);
+
+        await using var dataReader = await selectCommand.ExecuteReaderAsync(cancellationToken);
+        if (await dataReader.ReadAsync(cancellationToken))
+        {
+            uint weightOid = dataReader.GetFieldValue<uint>(0);
+            uint optimizerOid = dataReader.GetFieldValue<uint>(1);
+            await dataReader.CloseAsync();
+
+            await UnlinkLargeObjectAsync(connection, transaction, weightOid, cancellationToken);
+            await UnlinkLargeObjectAsync(connection, transaction, optimizerOid, cancellationToken);
+        }
+        else await dataReader.CloseAsync();
+       
+        await using var deleteCommand = new NpgsqlCommand(PostgresTrainingQueries.DeleteModelManifest, connection, transaction);
+        deleteCommand.Parameters.AddWithValue("@id", modelId);
+
+        await deleteCommand.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    // Helper to build SQL and parameters for queries
+    private (string Sql, List<NpgsqlParameter> Parameters) BuildQuerySql(CheckpointQuery query, bool includeOrderBy = true, bool includeLimit = true)
+    {
+        var sql = new StringBuilder(@"
+        SELECT m.model_id, m.epoch, m.loss, m.created_at, m.tags
+        FROM model_manifests m
+        JOIN model_blobs b ON m.model_id = b.model_id
+        WHERE 1=1
+    ");
+
+        var parameters = new List<NpgsqlParameter>();
+        int paramIndex = 0;
+
+        if (query.MinEpoch.HasValue)
+        {
+            sql.Append($" AND m.epoch >= @p{paramIndex}");
+            parameters.Add(new NpgsqlParameter($"@p{paramIndex}", query.MinEpoch.Value));
+            paramIndex++;
+        }
+        if (query.MaxEpoch.HasValue)
+        {
+            sql.Append($" AND m.epoch <= @p{paramIndex}");
+            parameters.Add(new NpgsqlParameter($"@p{paramIndex}", query.MaxEpoch.Value));
+            paramIndex++;
+        }
+        if (query.MinLoss.HasValue)
+        {
+            sql.Append($" AND m.loss >= @p{paramIndex}");
+            parameters.Add(new NpgsqlParameter($"@p{paramIndex}", query.MinLoss.Value));
+            paramIndex++;
+        }
+        if (query.MaxLoss.HasValue)
+        {
+            sql.Append($" AND m.loss <= @p{paramIndex}");
+            parameters.Add(new NpgsqlParameter($"@p{paramIndex}", query.MaxLoss.Value));
+            paramIndex++;
+        }
+        if (query.CreatedAfter.HasValue)
+        {
+            sql.Append($" AND m.created_at >= @p{paramIndex}");
+            parameters.Add(new NpgsqlParameter($"@p{paramIndex}", query.CreatedAfter.Value));
+            paramIndex++;
+        }
+        if (query.CreatedBefore.HasValue)
+        {
+            sql.Append($" AND m.created_at <= @p{paramIndex}");
+            parameters.Add(new NpgsqlParameter($"@p{paramIndex}", query.CreatedBefore.Value));
+            paramIndex++;
+        }
+        if (query.Tags != null && query.Tags.Count > 0)
+        {
+            var json = JsonSerializer.Serialize(query.Tags);
+            sql.Append($" AND m.tags @> @p{paramIndex}::jsonb");
+            parameters.Add(new NpgsqlParameter($"@p{paramIndex}", json));
+            paramIndex++;
+        }
+
+        if (includeOrderBy)
+        {
+            var orderColumn = query.OrderBy switch
+            {
+                CheckpointSortField.CreatedAt => "m.created_at",
+                CheckpointSortField.Epoch => "m.epoch",
+                CheckpointSortField.Loss => "m.loss",
+                _ => "m.created_at"
+            };
+            sql.Append($" ORDER BY {orderColumn} {(query.Descending ? "DESC" : "ASC")}");
+        }
+
+        if (includeLimit && query.Limit.HasValue && query.Limit.Value > 0)
+        {
+            sql.Append($" LIMIT @p{paramIndex}");
+            parameters.Add(new NpgsqlParameter($"@p{paramIndex}", query.Limit.Value));
+        }
+
+        return (sql.ToString(), parameters);
     }
 }

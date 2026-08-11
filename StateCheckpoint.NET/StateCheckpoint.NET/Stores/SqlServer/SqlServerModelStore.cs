@@ -1,15 +1,17 @@
-﻿using StateCheckpoint.NET.Models;
-using Microsoft.Data.SqlClient;
+﻿using Microsoft.Data.SqlClient;
+using Npgsql;
+using StateCheckpoint.NET.Models;
+using System.Runtime.CompilerServices;
+using System.Text;
 using System.Text.Json;
 
-namespace StateCheckpoint.NET.Stores;
+namespace StateCheckpoint.NET;
 
-public class SqlServerModelStore : SqlServerStoreBase, IModelStore
+internal class SqlServerModelStore : SqlServerStoreBase, IDbModelStore
 {
     private static readonly JsonSerializerOptions _jsonOpts = new() { WriteIndented = false };
 
     public SqlServerModelStore(string connectionString) : base(connectionString) { }
-    public SqlServerModelStore(SqlConnection connection) : base(connection) { }
 
     /// <summary>
     /// Ensures the schema for the model is created
@@ -18,7 +20,7 @@ public class SqlServerModelStore : SqlServerStoreBase, IModelStore
     /// <returns></returns>
     public async Task EnsureSchemaAsync(CancellationToken cancellationToken = default)
     {
-        using var connection = await GetConnectionAsync(cancellationToken);
+        await using var connection = await GetConnectionAsync(cancellationToken);
 
         await using var command = new SqlCommand(SqlServerTrainingQueries.EnsureModelSchema, connection);
 
@@ -33,7 +35,7 @@ public class SqlServerModelStore : SqlServerStoreBase, IModelStore
     /// <returns>id for model checkpoint</returns>
     public async Task SaveAsync(ModelCheckpoint checkpoint, CancellationToken cancellationToken = default)
     {
-        using var connection = await GetConnectionAsync(cancellationToken);
+        await using var connection = await GetConnectionAsync(cancellationToken);
         await using var tx = await connection.BeginTransactionAsync(cancellationToken);
 
         await using var command = new SqlCommand(SqlServerTrainingQueries.UpsertModelManifest, connection, tx as SqlTransaction);
@@ -67,7 +69,7 @@ public class SqlServerModelStore : SqlServerStoreBase, IModelStore
     /// <returns></returns>
     public async Task<ModelCheckpoint?> LoadAsync(Guid modelId, CancellationToken cancellationToken = default)
     {
-        using var connection = await GetConnectionAsync(cancellationToken);
+        await using var connection = await GetConnectionAsync(cancellationToken);
 
         await using var command = new SqlCommand(SqlServerTrainingQueries.SelectFullModelManifest, connection);
 
@@ -108,13 +110,40 @@ public class SqlServerModelStore : SqlServerStoreBase, IModelStore
     /// <returns></returns>
     public async Task DeleteAsync(Guid modelId, CancellationToken cancellationToken = default)
     {
-        using var connection = await GetConnectionAsync(cancellationToken);
+        await using var connection = await GetConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        try
+        {
+            await DeleteInternalAsync(connection, transaction as SqlTransaction, modelId, cancellationToken);
 
-        await using var command = new SqlCommand(SqlServerTrainingQueries.DeleteModelManifest, connection);
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch
+        {
+            await transaction.RollbackAsync(cancellationToken);
 
-        command.Parameters.AddWithValue("@Id", modelId);
+            throw;
+        }
+    }
 
-        await command.ExecuteNonQueryAsync(cancellationToken);
+    public async Task DeleteManyAsync(IEnumerable<Guid> modelIds, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await GetConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        try
+        {
+            foreach (var id in modelIds)
+            {
+                await DeleteInternalAsync(connection, transaction as SqlTransaction, id, cancellationToken);
+            }
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            throw;
+        }
     }
 
     /// <summary>
@@ -126,7 +155,7 @@ public class SqlServerModelStore : SqlServerStoreBase, IModelStore
     /// <returns></returns>
     public async Task<List<Guid>> ListAsync(string? tagKey = null, string? tagValue = null, CancellationToken cancellationToken = default)
     {
-        using var connection = await GetConnectionAsync(cancellationToken);
+        await using var connection = await GetConnectionAsync(cancellationToken);
 
         string sql;
         SqlCommand command;
@@ -154,5 +183,153 @@ public class SqlServerModelStore : SqlServerStoreBase, IModelStore
                 list.Add(reader.GetGuid(0));
             return list;
         }
+    }
+
+    public async Task<List<CheckpointSummary>> QueryAsync(CheckpointQuery query, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await GetConnectionAsync(cancellationToken);
+        var (sql, parameters) = BuildQuerySql(query, includeOrderBy: true, includeLimit: true);
+
+        await using var command = new SqlCommand(sql, connection);
+
+        command.Parameters.AddRange(parameters.ToArray());
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var results = new List<CheckpointSummary>();
+
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var hyperParamsJson = reader.GetString(5);
+            var hyperParams = JsonSerializer.Deserialize<HyperParameters>(hyperParamsJson);
+
+            results.Add(new CheckpointSummary
+            {
+                ModelId = reader.GetGuid(0),
+                CurrentEpoch = reader.GetInt32(1),
+                LastTrainingLoss = (float)reader.GetDouble(2),
+                CreatedAt = reader.GetDateTime(3),
+                Tags = JsonSerializer.Deserialize<Dictionary<string, string>>(reader.GetString(4)) ?? new(),
+                HyperParams = hyperParams
+            });
+        }
+
+        return results;
+    }
+
+    public async IAsyncEnumerable<CheckpointSummary> QueryStreamAsync(
+        CheckpointQuery query,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        await using var connection = await GetConnectionAsync(ct);
+        var (sql, parameters) = BuildQuerySql(query, includeOrderBy: true, includeLimit: true);
+
+        await using var command = new SqlCommand(sql, connection);
+        command.Parameters.AddRange(parameters.ToArray());
+
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            ct.ThrowIfCancellationRequested();
+            yield return new CheckpointSummary
+            {
+                ModelId = reader.GetGuid(0),
+                CurrentEpoch = reader.GetInt32(1),
+                LastTrainingLoss = (float)reader.GetDouble(2),
+                CreatedAt = reader.GetDateTime(3),
+                Tags = JsonSerializer.Deserialize<Dictionary<string, string>>(reader.GetString(4)) ?? new()
+            };
+        }
+    }
+
+    public async Task<CheckpointSummary?> GetCheckpointSummaryAsync(Guid modelId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await GetConnectionAsync(cancellationToken);
+        const string sql = @"
+        SELECT epoch, loss, created_at, hyper_params, tags
+        FROM ModelManifests
+        WHERE model_id = @id";
+        await using var command = new SqlCommand(sql, connection);
+        command.Parameters.AddWithValue("@id", modelId);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken)) return null;
+
+        return new CheckpointSummary
+        {
+            ModelId = modelId,
+            CurrentEpoch = reader.GetInt32(0),
+            LastTrainingLoss = (float)reader.GetDouble(1),
+            CreatedAt = reader.GetDateTime(2),
+            HyperParams = JsonSerializer.Deserialize<HyperParameters>(reader.GetString(3)),
+            Tags = JsonSerializer.Deserialize<Dictionary<string, string>>(reader.GetString(4)) ?? new()
+        };
+    }
+
+    //------------- Private Methods -----------------//
+
+    private async Task DeleteInternalAsync(
+        SqlConnection connection,
+        SqlTransaction transaction,
+        Guid sessionId,
+        CancellationToken cancellationToken)
+    {
+        await using var command = new SqlCommand(
+            "DELETE FROM inference_sessions WHERE session_id = @id",
+            connection,
+            transaction);
+
+        command.Parameters.AddWithValue("@id", sessionId);
+
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private (string Sql, List<SqlParameter> Parameters) BuildQuerySql(CheckpointQuery query, bool includeOrderBy = true, bool includeLimit = true)
+    {
+        var sql = new StringBuilder(@"
+        SELECT modelId, epoch, loss, createdAt, tags, hyperParams
+        FROM ModelManifests
+        WHERE 1=1
+    ");
+
+        var parameters = new List<SqlParameter>();
+
+        if (query.MinEpoch.HasValue) { sql.Append(" AND epoch >= @MinEpoch"); parameters.Add(new SqlParameter("@MinEpoch", query.MinEpoch.Value)); }
+        if (query.MaxEpoch.HasValue) { sql.Append(" AND epoch <= @MaxEpoch"); parameters.Add(new SqlParameter("@MaxEpoch", query.MaxEpoch.Value)); }
+        if (query.MinLoss.HasValue) { sql.Append(" AND loss >= @MinLoss"); parameters.Add(new SqlParameter("@MinLoss", query.MinLoss.Value)); }
+        if (query.MaxLoss.HasValue) { sql.Append(" AND loss <= @MaxLoss"); parameters.Add(new SqlParameter("@MaxLoss", query.MaxLoss.Value)); }
+        if (query.CreatedAfter.HasValue) { sql.Append(" AND created_at >= @CreatedAfter"); parameters.Add(new SqlParameter("@CreatedAfter", query.CreatedAfter.Value)); }
+        if (query.CreatedBefore.HasValue) { sql.Append(" AND created_at <= @CreatedBefore"); parameters.Add(new SqlParameter("@CreatedBefore", query.CreatedBefore.Value)); }
+
+        if (query.Tags != null && query.Tags.Count > 0)
+        {
+            foreach (var pair in query.Tags)
+            {
+                var keyParam = $"@tagKey_{pair.Key}";
+                var valParam = $"@tagVal_{pair.Key}";
+                sql.Append($" AND JSON_VALUE(tags, '$.{pair.Key}') = {valParam}");
+                parameters.Add(new SqlParameter(valParam, pair.Value));
+            }
+        }
+
+        if (includeOrderBy)
+        {
+            var orderColumn = query.OrderBy switch
+            {
+                CheckpointSortField.CreatedAt => "createdAt",
+                CheckpointSortField.Epoch => "epoch",
+                CheckpointSortField.Loss => "loss",
+                _ => "createdAt"
+            };
+
+            sql.Append($" ORDER BY {orderColumn} {(query.Descending ? "DESC" : "ASC")}");
+        }
+
+        if (includeLimit && query.Limit.HasValue && query.Limit.Value > 0)
+        {
+            sql.Append(" OFFSET 0 ROWS FETCH NEXT @Limit ROWS ONLY");
+            parameters.Add(new SqlParameter("@Limit", query.Limit.Value));
+        }
+
+        return (sql.ToString(), parameters);
     }
 }

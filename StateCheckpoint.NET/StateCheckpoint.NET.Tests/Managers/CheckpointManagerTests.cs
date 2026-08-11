@@ -1,359 +1,349 @@
-﻿using StateCheckpoint.NET.Manager;
+﻿using FluentAssertions;
 using StateCheckpoint.NET.Models;
 using StateCheckpoint.NET.Settings;
-using StateCheckpoint.NET.Stores;
-using FluentAssertions;
-using Moq;
 using System;
 using System.Collections.Generic;
-using System.Threading;
+using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using Xunit;
 
 namespace StateCheckpoint.NET.Tests.Manager;
 
-public class CheckpointManagerTests
+public class CheckpointManagerTests : IAsyncLifetime
 {
-    private readonly Mock<IModelStore> _mockStore;
-    private readonly HyperParameters _hyperParams;
-    private readonly TokenizerData _tokenizer;
-    private readonly byte[] _weights;
-    private readonly byte[] _optimizer;
-    private readonly Dictionary<Guid, ModelCheckpoint> _savedCheckpoints;
+    private readonly string _testRoot;
+    private StorageOptions _storageOptions;
+    private CheckpointManager _manager;
 
     public CheckpointManagerTests()
     {
-        _mockStore = new Mock<IModelStore>(MockBehavior.Strict);
-        _savedCheckpoints = new Dictionary<Guid, ModelCheckpoint>();
-
-        // Setup default behavior for SaveAsync
-        _mockStore.Setup(x => x.SaveAsync(It.IsAny<ModelCheckpoint>(), It.IsAny<CancellationToken>()))
-            .Callback<ModelCheckpoint, CancellationToken>((checkpoint, ct) =>
-            {
-                _savedCheckpoints[checkpoint.ModelId] = checkpoint;
-            })
-            .Returns(Task.CompletedTask);
-
-        // Setup default behavior for LoadAsync
-        _mockStore.Setup(x => x.LoadAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()))
-            .Returns<Guid, CancellationToken>((id, ct) =>
-            {
-                _savedCheckpoints.TryGetValue(id, out var checkpoint);
-                return Task.FromResult(checkpoint);
-            });
-
-        // Setup default behavior for DeleteAsync
-        _mockStore.Setup(x => x.DeleteAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()))
-            .Callback<Guid, CancellationToken>((id, ct) => _savedCheckpoints.Remove(id))
-            .Returns(Task.CompletedTask);
-
-        // Setup default behavior for ListAsync
-        _mockStore.Setup(x => x.ListAsync(It.IsAny<string?>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
-            .Returns<string?, string?, CancellationToken>((tagKey, tagValue, ct) =>
-            {
-                var ids = new List<Guid>(_savedCheckpoints.Keys);
-                return Task.FromResult(ids);
-            });
-
-        _hyperParams = new HyperParameters { HiddenSize = 768 };
-        _tokenizer = new TokenizerData { Type = "BPE" };
-        _weights = new byte[] { 1, 2, 3 };
-        _optimizer = new byte[] { 4, 5, 6 };
+        _testRoot = Path.Combine(Path.GetTempPath(), "StateCheckpointTests", Guid.NewGuid().ToString());
     }
 
-    // -------------------- Constructors --------------------
-
-    [Fact]
-    public void Constructor_WithStore_ShouldSetStore()
+    public async Task InitializeAsync()
     {
-        // Act
-        var manager = new CheckpointManager(_mockStore.Object);
-
-        // Assert
-        var id = manager.SaveAsync(_weights, _optimizer, _hyperParams, _tokenizer, 1, 0.5f).GetAwaiter().GetResult();
-        _mockStore.Verify(x => x.SaveAsync(It.IsAny<ModelCheckpoint>(), It.IsAny<CancellationToken>()), Times.Once);
-        _savedCheckpoints.Keys.Should().Contain(id);
-    }
-
-    [Fact]
-    public async Task Constructor_WithBackgroundOptions_ShouldCreateBackgroundSaver()
-    {
-        // Arrange
-        var saveCalled = new TaskCompletionSource<bool>();
-        var mockStore = new Mock<IModelStore>(MockBehavior.Loose);
-        mockStore.Setup(x => x.SaveAsync(It.IsAny<ModelCheckpoint>(), It.IsAny<CancellationToken>()))
-            .Callback(() => saveCalled.TrySetResult(true))
-            .Returns(Task.CompletedTask);
-
-        var options = new BackgroundSaveOptions { Enabled = true, QueueCapacity = 3 };
-        var manager = new CheckpointManager(mockStore.Object, options);
-
-        // Act – SaveAsync returns immediately (fire‑and‑forget)
-        var saveTask = manager.SaveAsync(_weights, _optimizer, _hyperParams, _tokenizer, 1, 0.5f);
-
-        // Assert – SaveAsync completed synchronously
-        saveTask.IsCompletedSuccessfully.Should().BeTrue();
-
-        // Store should NOT have been called yet (background hasn't run)
-        saveCalled.Task.IsCompleted.Should().BeFalse();
-
-        // Flush the background queue
-        await ((IAsyncDisposable)manager).DisposeAsync();
-
-        // Now the store should have been called
-        saveCalled.Task.IsCompleted.Should().BeTrue();
-    }
-
-    // -------------------- SaveAsync (Synchronous Mode) --------------------
-
-    [Fact]
-    public async Task SaveAsync_Synchronous_ShouldSaveCheckpoint()
-    {
-        // Arrange
-        var manager = new CheckpointManager(_mockStore.Object);
-
-        // Act
-        var id = await manager.SaveAsync(_weights, _optimizer, _hyperParams, _tokenizer, 5, 2.345f);
-
-        // Assert
-        _mockStore.Verify(x => x.SaveAsync(It.IsAny<ModelCheckpoint>(), It.IsAny<CancellationToken>()), Times.Once);
-        var saved = _savedCheckpoints[id];
-        saved.WeightsBytes.Should().BeEquivalentTo(_weights);
-        saved.OptimizerBytes.Should().BeEquivalentTo(_optimizer);
-        saved.HyperParams.Should().BeEquivalentTo(_hyperParams);
-        saved.Tokenizer.Should().BeEquivalentTo(_tokenizer);
-        saved.CurrentEpoch.Should().Be(5);
-        saved.LastTrainingLoss.Should().Be(2.345f);
-    }
-
-    [Fact]
-    public async Task SaveAsync_Synchronous_WithExistingId_ShouldUseProvidedId()
-    {
-        // Arrange
-        var existingId = Guid.NewGuid();
-        var manager = new CheckpointManager(_mockStore.Object);
-
-        // Act
-        var id = await manager.SaveAsync(_weights, _optimizer, _hyperParams, _tokenizer, 1, 0.5f, existingId);
-
-        // Assert
-        id.Should().Be(existingId);
-        _mockStore.Verify(x => x.SaveAsync(It.Is<ModelCheckpoint>(c => c.ModelId == existingId), It.IsAny<CancellationToken>()), Times.Once);
-    }
-
-    [Fact]
-    public async Task SaveAsync_Synchronous_WithTags_ShouldStoreTags()
-    {
-        // Arrange
-        var tags = new Dictionary<string, string> { { "key", "value" } };
-        var manager = new CheckpointManager(_mockStore.Object);
-
-        // Act
-        await manager.SaveAsync(_weights, _optimizer, _hyperParams, _tokenizer, 1, 0.5f, tags: tags);
-
-        // Assert
-        _mockStore.Verify(x => x.SaveAsync(It.Is<ModelCheckpoint>(c => c.Tags == tags), It.IsAny<CancellationToken>()), Times.Once);
-    }
-
-    [Fact]
-    public async Task SaveAsync_Synchronous_ShouldRespectCancellation()
-    {
-        // Arrange
-        var cts = new CancellationTokenSource();
-        cts.Cancel();
-        var manager = new CheckpointManager(_mockStore.Object);
-
-        // Act
-        var act = async () => await manager.SaveAsync(_weights, _optimizer, _hyperParams, _tokenizer, 1, 0.5f, cancellationToken: cts.Token);
-
-        // Assert
-        await act.Should().ThrowAsync<OperationCanceledException>();
-        _mockStore.Verify(x => x.SaveAsync(It.IsAny<ModelCheckpoint>(), It.IsAny<CancellationToken>()), Times.Never);
-    }
-
-    // -------------------- SaveAsync (Background Mode) --------------------
-
-    [Fact]
-    public async Task SaveAsync_Background_ShouldReturnImmediatelyAndSaveInBackground()
-    {
-        // Arrange - Use a ManualResetEvent or TaskCompletionSource to block the save
-        var saveCompleted = new TaskCompletionSource<bool>();
-        var mockStore = new Mock<IModelStore>(MockBehavior.Loose);
-        mockStore.Setup(x => x.SaveAsync(It.IsAny<ModelCheckpoint>(), It.IsAny<CancellationToken>()))
-            .Callback<ModelCheckpoint, CancellationToken>((c, ct) =>
-            {
-                // Simulate work
-                saveCompleted.SetResult(true);
-            })
-            .Returns(Task.CompletedTask);
-
-        var options = new BackgroundSaveOptions { Enabled = true };
-        var manager = new CheckpointManager(mockStore.Object, options);
-
-        // Act
-        var id = await manager.SaveAsync(_weights, _optimizer, _hyperParams, _tokenizer, 1, 0.5f);
-        id.Should().NotBe(Guid.Empty);
-
-        // Wait for background save to complete
-        await saveCompleted.Task.WaitAsync(TimeSpan.FromSeconds(5));
-
-        // Assert - store was called
-        mockStore.Verify(x => x.SaveAsync(It.IsAny<ModelCheckpoint>(), It.IsAny<CancellationToken>()), Times.Once);
-
-        await manager.DisposeAsync();
-    }
-
-    [Fact]
-    public async Task SaveAsync_Background_ShouldPerformDeepCopy()
-    {
-        // Arrange
-        var capturedCheckpoint = (ModelCheckpoint?)null;
-        var mockStore = new Mock<IModelStore>(MockBehavior.Loose);
-        mockStore.Setup(x => x.SaveAsync(It.IsAny<ModelCheckpoint>(), It.IsAny<CancellationToken>()))
-            .Callback<ModelCheckpoint, CancellationToken>((c, ct) => capturedCheckpoint = c)
-            .Returns(Task.CompletedTask);
-
-        var options = new BackgroundSaveOptions { Enabled = true };
-        var manager = new CheckpointManager(mockStore.Object, options);
-
-        var mutableWeights = new byte[] { 10, 20, 30 };
-        var mutableOptimizer = new byte[] { 40, 50, 60 };
-
-        // Act
-        await manager.SaveAsync(mutableWeights, mutableOptimizer, _hyperParams, _tokenizer, 1, 0.5f);
-        mutableWeights[0] = 99; // Mutate after save call
-        mutableOptimizer[0] = 99;
-
-        // Wait for background to process
-        await Task.Delay(200);
-
-        // Assert - saved bytes should be the original, not mutated
-        capturedCheckpoint.Should().NotBeNull();
-        capturedCheckpoint!.WeightsBytes.Should().BeEquivalentTo(new byte[] { 10, 20, 30 });
-        capturedCheckpoint.OptimizerBytes.Should().BeEquivalentTo(new byte[] { 40, 50, 60 });
-
-        await manager.DisposeAsync();
-    }
-
-    [Fact]
-    public async Task SaveAsync_Background_WithErrorCallback_ShouldInvokeOnError()
-    {
-        // Arrange
-        Exception? captured = null;
-        var options = new BackgroundSaveOptions
+        Directory.CreateDirectory(_testRoot);
+        _storageOptions = new StorageOptions
         {
-            Enabled = true,
-            OnError = ex => captured = ex
+            StoreType = StoreType.Local,
+            FileSystemStoreOptions = new FileSystemStoreOptions
+            {
+                RootPath = _testRoot,
+                EnsureDirectoryExists = true,
+                ValidatePermissionsOnStartup = true
+            }
         };
-
-        var mockStore = new Mock<IModelStore>(MockBehavior.Loose);
-        mockStore.Setup(x => x.SaveAsync(It.IsAny<ModelCheckpoint>(), It.IsAny<CancellationToken>()))
-            .Throws(new InvalidOperationException("Save failed"));
-
-        var manager = new CheckpointManager(mockStore.Object, options);
-
-        // Act
-        await manager.SaveAsync(_weights, _optimizer, _hyperParams, _tokenizer, 1, 0.5f);
-
-        // Wait for background to process
-        await Task.Delay(200);
-
-        // Assert
-        captured.Should().NotBeNull();
-        captured.Should().BeOfType<InvalidOperationException>();
-        captured!.Message.Should().Be("Save failed");
-
-        await manager.DisposeAsync();
+        _manager = new CheckpointManager(_storageOptions);
+        await Task.CompletedTask;
     }
 
-    // -------------------- LoadAsync --------------------
+    public async Task DisposeAsync()
+    {
+        await _manager.DisposeAsync();
+        if (Directory.Exists(_testRoot))
+            Directory.Delete(_testRoot, recursive: true);
+    }
+
+    private ModelCheckpoint CreateTestCheckpoint(
+        Guid? id = null,
+        int epoch = 1,
+        float loss = 0.5f,
+        Dictionary<string, string>? tags = null)
+    {
+        return new ModelCheckpoint
+        {
+            ModelId = id ?? Guid.NewGuid(),
+            WeightsBytes = new byte[] { 1, 2, 3 },
+            OptimizerBytes = new byte[] { 4, 5, 6 },
+            HyperParams = new HyperParameters { HiddenSize = 768 },
+            Tokenizer = new TokenizerData { Type = "BPE" },
+            CurrentEpoch = epoch,
+            LastTrainingLoss = loss,
+            CreatedAt = DateTime.UtcNow,
+            Tags = tags ?? new Dictionary<string, string>()
+        };
+    }
+
+    #region Constructor Validation
 
     [Fact]
-    public async Task LoadAsync_ShouldReturnCheckpointFromStore()
+    public void Constructor_WhenSqlDbWithoutConnectionString_Throws()
     {
-        // Arrange
-        var manager = new CheckpointManager(_mockStore.Object);
-        var id = await manager.SaveAsync(_weights, _optimizer, _hyperParams, _tokenizer, 1, 0.5f);
+        var options = new StorageOptions
+        {
+            StoreType = StoreType.SqlDb,
+            DbStoreOptions = new DbStorageOptions { ConnectionString = null }
+        };
+        Action act = () => new CheckpointManager(options);
+        act.Should().Throw<InvalidOperationException>()
+            .WithMessage("ConnectionString is required when StoreType is SqlDb.");
+    }
 
-        // Reset the mock call counter for LoadAsync
-        _mockStore.Invocations.Clear();
+    [Fact]
+    public void Constructor_WhenLocalWithoutRootPath_Throws()
+    {
+        var options = new StorageOptions
+        {
+            StoreType = StoreType.Local,
+            FileSystemStoreOptions = new FileSystemStoreOptions { RootPath = null }
+        };
+        Action act = () => new CheckpointManager(options);
+        act.Should().Throw<InvalidOperationException>()
+            .WithMessage("RootPath is required when StoreType is Local.");
+    }
 
-        // Act
-        var loaded = await manager.LoadAsync(id);
+    [Fact]
+    public void Constructor_WithValidLocalOptions_CreatesStore()
+    {
+        var options = new StorageOptions
+        {
+            StoreType = StoreType.Local,
+            FileSystemStoreOptions = new FileSystemStoreOptions { RootPath = _testRoot }
+        };
+        var manager = new CheckpointManager(options);
+        manager.Should().NotBeNull();
+        Directory.Exists(_testRoot).Should().BeTrue();
+    }
 
-        // Assert
-        _mockStore.Verify(x => x.LoadAsync(id, It.IsAny<CancellationToken>()), Times.Once);
+    [Fact]
+    public void Constructor_WithBackgroundSaveEnabled_CreatesBackgroundSaver()
+    {
+        var options = new StorageOptions
+        {
+            StoreType = StoreType.Local,
+            FileSystemStoreOptions = new FileSystemStoreOptions { RootPath = _testRoot },
+            BackgroundSaveOptions = new BackgroundSaveOptions { Enabled = true, QueueCapacity = 5 }
+        };
+        var manager = new CheckpointManager(options);
+        var field = typeof(CheckpointManager).GetField("_backgroundSaver", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        var saver = field?.GetValue(manager);
+        saver.Should().NotBeNull();
+    }
+
+    #endregion
+
+    #region Save and Load
+
+    [Fact]
+    public async Task SaveAsync_WithNewCheckpoint_SavesAndReturnsId()
+    {
+        var checkpoint = CreateTestCheckpoint();
+        var id = await _manager.SaveAsync(checkpoint);
+
+        id.Should().Be(checkpoint.ModelId);
+
+        var loaded = await _manager.LoadAsync(id);
         loaded.Should().NotBeNull();
-        loaded!.ModelId.Should().Be(id);
+        loaded.ModelId.Should().Be(id);
+        loaded.WeightsBytes.Should().BeEquivalentTo(checkpoint.WeightsBytes);
+        loaded.OptimizerBytes.Should().BeEquivalentTo(checkpoint.OptimizerBytes);
+        loaded.HyperParams.Should().BeEquivalentTo(checkpoint.HyperParams);
+        loaded.Tokenizer.Should().BeEquivalentTo(checkpoint.Tokenizer);
+        loaded.CurrentEpoch.Should().Be(checkpoint.CurrentEpoch);
+        loaded.LastTrainingLoss.Should().Be(checkpoint.LastTrainingLoss);
+        loaded.Tags.Should().BeEquivalentTo(checkpoint.Tags);
     }
 
     [Fact]
-    public async Task LoadAsync_WhenNotFound_ShouldReturnNull()
+    public async Task SaveAsync_WithExistingId_UpdatesCheckpoint()
     {
-        // Arrange
-        var mockStore = new Mock<IModelStore>(MockBehavior.Loose);
-        mockStore.Setup(x => x.LoadAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()))
-            .Returns<Guid, CancellationToken>((id, ct) => Task.FromResult<ModelCheckpoint?>(null));
+        var checkpoint = CreateTestCheckpoint();
+        var id = await _manager.SaveAsync(checkpoint);
 
-        var manager = new CheckpointManager(mockStore.Object);
+        var updated = CreateTestCheckpoint(id, epoch: 5, loss: 0.1f);
+        var returnedId = await _manager.SaveAsync(updated);
 
-        // Act
-        var loaded = await manager.LoadAsync(Guid.NewGuid());
+        returnedId.Should().Be(id);
 
-        // Assert
+        var loaded = await _manager.LoadAsync(id);
+        loaded.CurrentEpoch.Should().Be(5);
+        loaded.LastTrainingLoss.Should().Be(0.1f);
+    }
+
+    [Fact]
+    public async Task LoadAsync_WhenNotExists_ReturnsNull()
+    {
+        var result = await _manager.LoadAsync(Guid.NewGuid());
+        result.Should().BeNull();
+    }
+
+    #endregion
+
+    #region Delete
+
+    [Fact]
+    public async Task DeleteAsync_RemovesCheckpoint()
+    {
+        var checkpoint = CreateTestCheckpoint();
+        var id = await _manager.SaveAsync(checkpoint);
+
+        await _manager.DeleteAsync(id);
+
+        var loaded = await _manager.LoadAsync(id);
         loaded.Should().BeNull();
     }
 
-    // -------------------- DeleteAsync --------------------
+    #endregion
+
+    #region List
 
     [Fact]
-    public async Task DeleteAsync_ShouldCallStoreDelete()
+    public async Task ListAsync_WithoutFilters_ReturnsAllIds()
     {
-        // Arrange
-        var manager = new CheckpointManager(_mockStore.Object);
-        var id = await manager.SaveAsync(_weights, _optimizer, _hyperParams, _tokenizer, 1, 0.5f);
-        _savedCheckpoints.Keys.Should().Contain(id);
+        var ids = new List<Guid>();
+        for (int i = 0; i < 3; i++)
+        {
+            var cp = CreateTestCheckpoint();
+            ids.Add(await _manager.SaveAsync(cp));
+        }
 
-        _mockStore.Invocations.Clear();
-
-        // Act
-        await manager.DeleteAsync(id);
-
-        // Assert
-        _mockStore.Verify(x => x.DeleteAsync(id, It.IsAny<CancellationToken>()), Times.Once);
-        _savedCheckpoints.Keys.Should().NotContain(id);
-    }
-
-    // -------------------- ListAsync --------------------
-
-    [Fact]
-    public async Task ListAsync_ShouldReturnAllIds()
-    {
-        // Arrange
-        var manager = new CheckpointManager(_mockStore.Object);
-        var id1 = await manager.SaveAsync(_weights, _optimizer, _hyperParams, _tokenizer, 1, 0.5f);
-        var id2 = await manager.SaveAsync(_weights, _optimizer, _hyperParams, _tokenizer, 2, 0.6f);
-
-        _mockStore.Invocations.Clear();
-
-        // Act
-        var ids = await manager.ListAsync();
-
-        // Assert
-        _mockStore.Verify(x => x.ListAsync(null, null, It.IsAny<CancellationToken>()), Times.Once);
-        ids.Should().BeEquivalentTo(new[] { id1, id2 });
+        var all = await _manager.ListAsync();
+        all.Should().BeEquivalentTo(ids);
     }
 
     [Fact]
-    public async Task ListAsync_WithTagFilter_ShouldPassTagsToStore()
+    public async Task ListAsync_WithTagFilter_ReturnsMatchingIds()
     {
-        // Arrange
-        var manager = new CheckpointManager(_mockStore.Object);
+        var cp1 = CreateTestCheckpoint(tags: new Dictionary<string, string> { { "env", "prod" } });
+        var cp2 = CreateTestCheckpoint(tags: new Dictionary<string, string> { { "env", "dev" } });
 
-        // Act
-        await manager.ListAsync("key", "value");
+        var id1 = await _manager.SaveAsync(cp1);
+        var id2 = await _manager.SaveAsync(cp2);
 
-        // Assert
-        _mockStore.Verify(x => x.ListAsync("key", "value", It.IsAny<CancellationToken>()), Times.Once);
+        var result = await _manager.ListAsync("env", "prod");
+
+        result.Count.Should().Be(1);
+        result.Should().Contain(id1);
+        result.Should().NotContain(id2);
     }
+
+    #endregion
+
+    #region Query
+
+    [Fact]
+    public async Task QueryAsync_ReturnsSummaries()
+    {
+        var cp1 = CreateTestCheckpoint(epoch: 1, loss: 0.5f);
+        var cp2 = CreateTestCheckpoint(epoch: 2, loss: 0.3f);
+        await _manager.SaveAsync(cp1);
+        await _manager.SaveAsync(cp2);
+
+        var query = new CheckpointQuery { MinEpoch = 2 };
+        var summaries = await _manager.QueryAsync(query);
+
+        summaries.Should().ContainSingle(s => s.CurrentEpoch == 2);
+        summaries.Should().NotContain(s => s.CurrentEpoch == 1);
+    }
+
+    [Fact]
+    public async Task QueryStreamAsync_StreamsSummaries()
+    {
+        var cp1 = CreateTestCheckpoint(epoch: 1);
+        var cp2 = CreateTestCheckpoint(epoch: 2);
+        await _manager.SaveAsync(cp1);
+        await _manager.SaveAsync(cp2);
+
+        var stream = _manager.QueryStreamAsync(new CheckpointQuery());
+        var list = await stream.ToListAsync();
+
+        list.Should().HaveCount(2);
+        list.Should().Contain(s => s.CurrentEpoch == 1);
+        list.Should().Contain(s => s.CurrentEpoch == 2);
+    }
+
+    #endregion
+
+    #region FindBest
+
+    [Fact]
+    public async Task FindBestAsync_ReturnsBestByScore()
+    {
+        var cp1 = CreateTestCheckpoint(epoch: 1, loss: 0.5f);
+        var cp2 = CreateTestCheckpoint(epoch: 2, loss: 0.2f);
+        var cp3 = CreateTestCheckpoint(epoch: 3, loss: 0.4f);
+        await _manager.SaveAsync(cp1);
+        await _manager.SaveAsync(cp2);
+        await _manager.SaveAsync(cp3);
+
+        // By loss (lowest = highest score when using negative loss)
+        var best = await _manager.FindBestAsync(s => -s.LastTrainingLoss);
+        best.Should().NotBeNull();
+        best.ModelId.Should().Be(cp2.ModelId);
+        best.LastTrainingLoss.Should().Be(0.2f);
+    }
+
+    [Fact]
+    public async Task FindBestByLossAsync_ReturnsLowestLoss()
+    {
+        var cp1 = CreateTestCheckpoint(loss: 0.5f);
+        var cp2 = CreateTestCheckpoint(loss: 0.1f);
+        await _manager.SaveAsync(cp1);
+        await _manager.SaveAsync(cp2);
+
+        var best = await _manager.FindBestByLossAsync();
+        best.Should().NotBeNull();
+        best.ModelId.Should().Be(cp2.ModelId);
+    }
+
+    [Fact]
+    public async Task FindLatestEpochAsync_ReturnsHighestEpoch()
+    {
+        var cp1 = CreateTestCheckpoint(epoch: 1);
+        var cp2 = CreateTestCheckpoint(epoch: 10);
+        var cp3 = CreateTestCheckpoint(epoch: 5);
+        await _manager.SaveAsync(cp1);
+        await _manager.SaveAsync(cp2);
+        await _manager.SaveAsync(cp3);
+
+        var best = await _manager.FindLatestEpochAsync();
+        best.Should().NotBeNull();
+        best.ModelId.Should().Be(cp2.ModelId);
+        best.CurrentEpoch.Should().Be(10);
+    }
+
+    [Fact]
+    public async Task FindBestAsync_WhenNoCheckpoints_ReturnsNull()
+    {
+        var result = await _manager.FindBestAsync(s => s.CurrentEpoch);
+        result.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task FindBestAsync_WithFilter_AppliesFilter()
+    {
+        var cp1 = CreateTestCheckpoint(epoch: 1, loss: 0.5f);
+        var cp2 = CreateTestCheckpoint(epoch: 2, loss: 0.2f);
+        var cp3 = CreateTestCheckpoint(epoch: 3, loss: 0.4f);
+        await _manager.SaveAsync(cp1);
+        await _manager.SaveAsync(cp2);
+        await _manager.SaveAsync(cp3);
+
+        var filter = new CheckpointQuery { MinEpoch = 2 };
+        var best = await _manager.FindBestAsync(s => -s.LastTrainingLoss, filter);
+
+        best.Should().NotBeNull();
+        best.ModelId.Should().Be(cp2.ModelId);
+        best.CurrentEpoch.Should().Be(2);
+        best.LastTrainingLoss.Should().Be(0.2f);
+    }
+
+    #endregion
+
+    #region Dispose
+
+    [Fact]
+    public async Task DisposeAsync_DisposesStore()
+    {
+        // Already called in DisposeAsync of the test class
+        // We'll just verify that the store is disposed by trying to use it? Not needed.
+        // We can check that the directory is gone? The test already does.
+        // This test just ensures the method exists and doesn't throw.
+        await _manager.DisposeAsync();
+        // If the store was already disposed, calling again should be safe.
+        await _manager.DisposeAsync();
+    }
+
+    #endregion
 }

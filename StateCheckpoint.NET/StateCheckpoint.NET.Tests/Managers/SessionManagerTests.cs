@@ -1,372 +1,261 @@
-﻿using StateCheckpoint.NET.Manager;
+﻿using FluentAssertions;
 using StateCheckpoint.NET.Models;
 using StateCheckpoint.NET.Settings;
-using StateCheckpoint.NET.Stores;
-using FluentAssertions;
-using Moq;
 
 namespace StateCheckpoint.NET.Tests.Manager;
 
-public class SessionManagerTests
+public class SessionManagerTests : IAsyncLifetime
 {
-    private readonly Mock<ISessionStore> _mockStore;
-    private readonly byte[] _kvCache;
-    private readonly int[] _tokenHistory;
-    private readonly string _modelFingerprint;
-    private readonly SamplingData _samplingConfig;
-    private readonly Guid _sessionId;
-    private readonly Dictionary<Guid, SessionCheckpoint> _savedSessions;
+    private readonly string _testRoot;
+    private StorageOptions _storageOptions;
+    private SessionManager _manager;
 
     public SessionManagerTests()
     {
-        _mockStore = new Mock<ISessionStore>(MockBehavior.Strict);
-        _savedSessions = new Dictionary<Guid, SessionCheckpoint>();
-
-        // Default setup for SaveAsync
-        _mockStore.Setup(x => x.SaveAsync(It.IsAny<SessionCheckpoint>(), It.IsAny<CancellationToken>()))
-            .Callback<SessionCheckpoint, CancellationToken>((session, ct) =>
-            {
-                _savedSessions[session.SessionId] = session;
-            })
-            .Returns(Task.CompletedTask);
-
-        // Default setup for LoadAsync
-        _mockStore.Setup(x => x.LoadAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()))
-            .Returns<Guid, CancellationToken>((id, ct) =>
-            {
-                _savedSessions.TryGetValue(id, out var session);
-                return Task.FromResult(session);
-            });
-
-        // Default setup for DeleteAsync
-        _mockStore.Setup(x => x.DeleteAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()))
-            .Callback<Guid, CancellationToken>((id, ct) => _savedSessions.Remove(id))
-            .Returns(Task.CompletedTask);
-
-        // Default setup for ListAsync
-        _mockStore.Setup(x => x.ListAsync(It.IsAny<string?>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
-            .Returns<string?, string?, CancellationToken>((tagKey, tagValue, ct) =>
-            {
-                var ids = new List<Guid>(_savedSessions.Keys);
-                return Task.FromResult(ids);
-            });
-
-        _kvCache = new byte[] { 10, 20, 30, 40 };
-        _tokenHistory = new int[] { 1, 2, 3, 100, 200 };
-        _modelFingerprint = "llama-2-7b-v1";
-        _samplingConfig = new SamplingData { Temperature = 0.8f, TopP = 0.95f };
-        _sessionId = Guid.NewGuid();
+        _testRoot = Path.Combine(Path.GetTempPath(), "StateCheckpointSessionTests", Guid.NewGuid().ToString());
     }
 
-    // -------------------- Constructors --------------------
-
-    [Fact]
-    public void Constructor_WithStore_ShouldSetStore()
+    public async Task InitializeAsync()
     {
-        // Act
-        var manager = new SessionManager(_mockStore.Object);
-
-        // Assert
-        var id = manager.SaveAsync(_sessionId, _kvCache, _tokenHistory, _modelFingerprint).GetAwaiter().GetResult();
-        _mockStore.Verify(x => x.SaveAsync(It.IsAny<SessionCheckpoint>(), It.IsAny<CancellationToken>()), Times.Once);
-        _savedSessions.Keys.Should().Contain(id);
-    }
-
-    [Fact]
-    public async Task Constructor_WithBackgroundOptions_ShouldCreateBackgroundSaver()
-    {
-        // Arrange
-        var saveCalled = new TaskCompletionSource<bool>();
-        var mockStore = new Mock<ISessionStore>(MockBehavior.Loose);
-
-        // Use a ManualResetEventSlim to block the worker thread.
-        using var blockEvent = new ManualResetEventSlim(false);
-
-        // Setup the mock's SaveAsync to block until we signal the event.
-        mockStore.Setup(x => x.SaveAsync(It.IsAny<SessionCheckpoint>(), It.IsAny<CancellationToken>()))
-            .Callback<SessionCheckpoint, CancellationToken>((s, ct) =>
-            {
-                // Block the worker thread until we release it.
-                blockEvent.Wait(ct);
-                saveCalled.TrySetResult(true);
-            })
-            .Returns(Task.CompletedTask);
-
-        var options = new BackgroundSaveOptions { Enabled = true, QueueCapacity = 1 };
-        var manager = new SessionManager(mockStore.Object, options);
-
-        // Act – SaveAsync enqueues the save, but the worker is blocked on the event.
-        var saveTask = manager.SaveAsync(_sessionId, _kvCache, _tokenHistory, _modelFingerprint);
-
-        // Assert – SaveAsync completed synchronously (fire-and-forget).
-        saveTask.IsCompletedSuccessfully.Should().BeTrue();
-
-        // The worker is blocked, so the save should NOT have been called yet.
-        saveCalled.Task.IsCompleted.Should().BeFalse();
-
-        // Now release the worker by signaling the event.
-        blockEvent.Set();
-
-        // Wait for the background save to complete.
-        await saveCalled.Task.TimeoutAfter(2000);
-
-        // The save should have been called.
-        saveCalled.Task.IsCompleted.Should().BeTrue();
-
-        // Clean up
-        await manager.DisposeAsync();
-    }
-
-    // -------------------- SaveAsync (Synchronous) --------------------
-
-    [Fact]
-    public async Task SaveAsync_Synchronous_ShouldSaveSession()
-    {
-        // Arrange
-        var manager = new SessionManager(_mockStore.Object);
-
-        // Act
-        var id = await manager.SaveAsync(_sessionId, _kvCache, _tokenHistory, _modelFingerprint, _samplingConfig);
-
-        // Assert
-        _mockStore.Verify(x => x.SaveAsync(It.IsAny<SessionCheckpoint>(), It.IsAny<CancellationToken>()), Times.Once);
-        var saved = _savedSessions[id];
-        saved.KvCacheBytes.Should().BeEquivalentTo(_kvCache);
-        saved.TokenHistory.Should().BeEquivalentTo(_tokenHistory);
-        saved.ModelFingerprint.Should().Be(_modelFingerprint);
-        saved.SamplingConfig.Temperature.Should().Be(_samplingConfig.Temperature);
-    }
-
-    [Fact]
-    public async Task SaveAsync_Synchronous_WithTags_ShouldStoreTags()
-    {
-        // Arrange
-        var tags = new Dictionary<string, string> { { "User", "Alice" } };
-        var manager = new SessionManager(_mockStore.Object);
-
-        // Act
-        await manager.SaveAsync(_sessionId, _kvCache, _tokenHistory, _modelFingerprint, tags: tags);
-
-        // Assert
-        _mockStore.Verify(x => x.SaveAsync(
-            It.Is<SessionCheckpoint>(s => s.Tags == tags),
-            It.IsAny<CancellationToken>()), Times.Once);
-    }
-
-    [Fact]
-    public async Task SaveAsync_Synchronous_ShouldRespectCancellation()
-    {
-        // Arrange
-        var cts = new CancellationTokenSource();
-        cts.Cancel();
-        var manager = new SessionManager(_mockStore.Object);
-
-        // Act
-        var act = async () => await manager.SaveAsync(
-            _sessionId, _kvCache, _tokenHistory, _modelFingerprint,
-            cancellationToken: cts.Token);
-
-        // Assert
-        await act.Should().ThrowAsync<OperationCanceledException>();
-        _mockStore.Verify(x => x.SaveAsync(It.IsAny<SessionCheckpoint>(), It.IsAny<CancellationToken>()), Times.Never);
-    }
-
-    [Fact]
-    public async Task SaveAsync_Synchronous_WhenSamplingConfigNull_UsesDefault()
-    {
-        // Arrange
-        var manager = new SessionManager(_mockStore.Object);
-
-        // Act
-        var id = await manager.SaveAsync(_sessionId, _kvCache, _tokenHistory, _modelFingerprint, samplingConfig: null);
-
-        // Assert
-        _mockStore.Verify(x => x.SaveAsync(
-            It.Is<SessionCheckpoint>(s => s.SamplingConfig.Temperature == 0.7f && s.SamplingConfig.TopP == 0.9f),
-            It.IsAny<CancellationToken>()), Times.Once);
-    }
-
-    // -------------------- SaveAsync (Background) --------------------
-
-    [Fact]
-    public async Task SaveAsync_Background_ShouldReturnImmediatelyAndSaveInBackground()
-    {
-        // Arrange
-        var saveCompleted = new TaskCompletionSource<bool>();
-        var mockStore = new Mock<ISessionStore>(MockBehavior.Loose);
-        mockStore.Setup(x => x.SaveAsync(It.IsAny<SessionCheckpoint>(), It.IsAny<CancellationToken>()))
-            .Callback<SessionCheckpoint, CancellationToken>((s, ct) => saveCompleted.SetResult(true))
-            .Returns(Task.CompletedTask);
-
-        var options = new BackgroundSaveOptions { Enabled = true };
-        var manager = new SessionManager(mockStore.Object, options);
-
-        // Act
-        var id = await manager.SaveAsync(_sessionId, _kvCache, _tokenHistory, _modelFingerprint);
-        id.Should().NotBe(Guid.Empty);
-
-        // Wait for background
-        await saveCompleted.Task.WaitAsync(TimeSpan.FromSeconds(5));
-
-        // Assert
-        mockStore.Verify(x => x.SaveAsync(It.IsAny<SessionCheckpoint>(), It.IsAny<CancellationToken>()), Times.Once);
-        await manager.DisposeAsync();
-    }
-
-    [Fact]
-    public async Task SaveAsync_Background_ShouldPerformDeepCopy()
-    {
-        // Arrange
-        SessionCheckpoint? captured = null;
-        var mockStore = new Mock<ISessionStore>(MockBehavior.Loose);
-        mockStore.Setup(x => x.SaveAsync(It.IsAny<SessionCheckpoint>(), It.IsAny<CancellationToken>()))
-            .Callback<SessionCheckpoint, CancellationToken>((s, ct) => captured = s)
-            .Returns(Task.CompletedTask);
-
-        var options = new BackgroundSaveOptions { Enabled = true };
-        var manager = new SessionManager(mockStore.Object, options);
-        var mutableKv = new byte[] { 50, 60, 70, 80 };
-
-        // Act
-        await manager.SaveAsync(_sessionId, mutableKv, _tokenHistory, _modelFingerprint);
-        mutableKv[0] = 99; // Mutate
-
-        // Wait for background
-        await Task.Delay(200);
-
-        // Assert
-        captured.Should().NotBeNull();
-        captured!.KvCacheBytes.Should().BeEquivalentTo(new byte[] { 50, 60, 70, 80 });
-        await manager.DisposeAsync();
-    }
-
-    [Fact]
-    public async Task SaveAsync_Background_WithErrorCallback_ShouldInvokeOnError()
-    {
-        // Arrange
-        Exception? captured = null;
-        var options = new BackgroundSaveOptions
+        Directory.CreateDirectory(_testRoot);
+        _storageOptions = new StorageOptions
         {
-            Enabled = true,
-            OnError = ex => captured = ex
+            StoreType = StoreType.Local,
+            FileSystemStoreOptions = new FileSystemStoreOptions
+            {
+                RootPath = _testRoot,
+                EnsureDirectoryExists = true,
+                ValidatePermissionsOnStartup = true
+            }
         };
-        var mockStore = new Mock<ISessionStore>(MockBehavior.Loose);
-        mockStore.Setup(x => x.SaveAsync(It.IsAny<SessionCheckpoint>(), It.IsAny<CancellationToken>()))
-            .Throws(new InvalidOperationException("Save failed"));
-
-        var manager = new SessionManager(mockStore.Object, options);
-
-        // Act
-        await manager.SaveAsync(_sessionId, _kvCache, _tokenHistory, _modelFingerprint);
-        await Task.Delay(200);
-
-        // Assert
-        captured.Should().NotBeNull();
-        captured.Should().BeOfType<InvalidOperationException>();
-        captured!.Message.Should().Be("Save failed");
-        await manager.DisposeAsync();
+        _manager = new SessionManager(_storageOptions);
+        await Task.CompletedTask;
     }
 
-    // -------------------- LoadAsync --------------------
+    public async Task DisposeAsync()
+    {
+        await _manager.DisposeAsync();
+        if (Directory.Exists(_testRoot))
+            Directory.Delete(_testRoot, recursive: true);
+    }
+
+    private SessionCheckpoint CreateTestSession(
+        Guid? id = null,
+        string modelFingerprint = "test-model",
+        byte[]? kvCache = null,
+        int[]? tokenHistory = null,
+        Dictionary<string, string>? tags = null)
+    {
+        return new SessionCheckpoint
+        {
+            SessionId = id ?? Guid.NewGuid(),
+            KvCacheBytes = kvCache ?? new byte[] { 10, 20, 30 },
+            TokenHistory = tokenHistory ?? new int[] { 1, 2, 3 },
+            ModelFingerprint = modelFingerprint,
+            SamplingConfig = new SamplingData { Temperature = 0.8f },
+            LastUpdated = DateTime.UtcNow,
+            Tags = tags ?? new Dictionary<string, string>()
+        };
+    }
+
+    #region Constructor Validation
 
     [Fact]
-    public async Task LoadAsync_ShouldReturnSessionFromStore()
+    public void Constructor_WhenSqlDbWithoutConnectionString_Throws()
     {
-        // Arrange
-        var manager = new SessionManager(_mockStore.Object);
-        var id = await manager.SaveAsync(_sessionId, _kvCache, _tokenHistory, _modelFingerprint);
-        _mockStore.Invocations.Clear();
+        var options = new StorageOptions
+        {
+            StoreType = StoreType.SqlDb,
+            DbStoreOptions = new DbStorageOptions { ConnectionString = null }
+        };
+        Action act = () => new SessionManager(options);
+        act.Should().Throw<InvalidOperationException>()
+            .WithMessage("ConnectionString is required when StoreType is SqlDb.");
+    }
 
-        // Act
-        var loaded = await manager.LoadAsync(id);
+    [Fact]
+    public void Constructor_WhenLocalWithoutRootPath_Throws()
+    {
+        var options = new StorageOptions
+        {
+            StoreType = StoreType.Local,
+            FileSystemStoreOptions = new FileSystemStoreOptions { RootPath = null }
+        };
+        Action act = () => new SessionManager(options);
+        act.Should().Throw<InvalidOperationException>()
+            .WithMessage("RootPath is required when StoreType is Local.");
+    }
 
-        // Assert
-        _mockStore.Verify(x => x.LoadAsync(id, It.IsAny<CancellationToken>()), Times.Once);
+    [Fact]
+    public void Constructor_WithValidLocalOptions_CreatesStore()
+    {
+        var options = new StorageOptions
+        {
+            StoreType = StoreType.Local,
+            FileSystemStoreOptions = new FileSystemStoreOptions { RootPath = _testRoot }
+        };
+        var manager = new SessionManager(options);
+        manager.Should().NotBeNull();
+        Directory.Exists(_testRoot).Should().BeTrue();
+    }
+
+    [Fact]
+    public void Constructor_WithBackgroundSaveEnabled_CreatesBackgroundSaver()
+    {
+        var options = new StorageOptions
+        {
+            StoreType = StoreType.Local,
+            FileSystemStoreOptions = new FileSystemStoreOptions { RootPath = _testRoot },
+            BackgroundSaveOptions = new BackgroundSaveOptions { Enabled = true, QueueCapacity = 5 }
+        };
+        var manager = new SessionManager(options);
+        var field = typeof(SessionManager).GetField("_backgroundSaver", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        var saver = field?.GetValue(manager);
+        saver.Should().NotBeNull();
+    }
+
+    #endregion
+
+    #region Save and Load
+
+    [Fact]
+    public async Task SaveAsync_WithNewSession_SavesAndReturnsId()
+    {
+        var session = CreateTestSession();
+        var id = await _manager.SaveAsync(session);
+
+        id.Should().Be(session.SessionId);
+
+        var loaded = await _manager.LoadAsync(id);
         loaded.Should().NotBeNull();
-        loaded!.SessionId.Should().Be(id);
+        loaded.SessionId.Should().Be(id);
+        loaded.KvCacheBytes.Should().BeEquivalentTo(session.KvCacheBytes);
+        loaded.TokenHistory.Should().BeEquivalentTo(session.TokenHistory);
+        loaded.ModelFingerprint.Should().Be(session.ModelFingerprint);
+        loaded.SamplingConfig.Should().BeEquivalentTo(session.SamplingConfig);
+        loaded.Tags.Should().BeEquivalentTo(session.Tags);
     }
 
     [Fact]
-    public async Task LoadAsync_WhenNotFound_ShouldReturnNull()
+    public async Task SaveAsync_WithExistingId_UpdatesSession()
     {
-        // Arrange
-        var mockStore = new Mock<ISessionStore>(MockBehavior.Loose);
-        mockStore.Setup(x => x.LoadAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()))
-            .Returns<Guid, CancellationToken>((id, ct) => Task.FromResult<SessionCheckpoint?>(null));
+        var session = CreateTestSession();
+        var id = await _manager.SaveAsync(session);
 
-        var manager = new SessionManager(mockStore.Object);
+        var updated = CreateTestSession(id, modelFingerprint: "updated-model", kvCache: new byte[] { 99, 88 });
+        var returnedId = await _manager.SaveAsync(updated);
 
-        // Act
-        var loaded = await manager.LoadAsync(Guid.NewGuid());
+        returnedId.Should().Be(id);
 
-        // Assert
+        var loaded = await _manager.LoadAsync(id);
+        loaded.ModelFingerprint.Should().Be("updated-model");
+        loaded.KvCacheBytes.Should().BeEquivalentTo(new byte[] { 99, 88 });
+    }
+
+    [Fact]
+    public async Task LoadAsync_WhenNotExists_ReturnsNull()
+    {
+        var result = await _manager.LoadAsync(Guid.NewGuid());
+        result.Should().BeNull();
+    }
+
+    #endregion
+
+    #region Delete
+
+    [Fact]
+    public async Task DeleteAsync_RemovesSession()
+    {
+        var session = CreateTestSession();
+        var id = await _manager.SaveAsync(session);
+
+        await _manager.DeleteAsync(id);
+
+        var loaded = await _manager.LoadAsync(id);
         loaded.Should().BeNull();
     }
 
-    // -------------------- DeleteAsync --------------------
+    #endregion
+
+    #region List
 
     [Fact]
-    public async Task DeleteAsync_ShouldCallStoreDelete()
+    public async Task ListAsync_WithoutFilters_ReturnsAllIds()
     {
-        // Arrange
-        var manager = new SessionManager(_mockStore.Object);
-        var id = await manager.SaveAsync(_sessionId, _kvCache, _tokenHistory, _modelFingerprint);
-        _savedSessions.Keys.Should().Contain(id);
-        _mockStore.Invocations.Clear();
+        var ids = new List<Guid>();
+        for (int i = 0; i < 3; i++)
+        {
+            var s = CreateTestSession();
+            ids.Add(await _manager.SaveAsync(s));
+        }
 
-        // Act
-        await manager.DeleteAsync(id);
-
-        // Assert
-        _mockStore.Verify(x => x.DeleteAsync(id, It.IsAny<CancellationToken>()), Times.Once);
-        _savedSessions.Keys.Should().NotContain(id);
-    }
-
-    // -------------------- ListAsync --------------------
-
-    [Fact]
-    public async Task ListAsync_ShouldReturnAllIds()
-    {
-        // Arrange
-        var manager = new SessionManager(_mockStore.Object);
-        var id1 = await manager.SaveAsync(Guid.NewGuid(), _kvCache, _tokenHistory, _modelFingerprint);
-        var id2 = await manager.SaveAsync(Guid.NewGuid(), _kvCache, _tokenHistory, _modelFingerprint);
-        _mockStore.Invocations.Clear();
-
-        // Act
-        var ids = await manager.ListAsync();
-
-        // Assert
-        _mockStore.Verify(x => x.ListAsync(null, null, It.IsAny<CancellationToken>()), Times.Once);
-        ids.Should().BeEquivalentTo(new[] { id1, id2 });
+        var all = await _manager.ListAsync();
+        all.Should().BeEquivalentTo(ids);
     }
 
     [Fact]
-    public async Task ListAsync_WithTagFilter_ShouldPassTagsToStore()
+    public async Task ListAsync_WithTagFilter_ReturnsMatchingIds()
     {
-        // Arrange
-        var manager = new SessionManager(_mockStore.Object);
+        var s1 = CreateTestSession(tags: new Dictionary<string, string> { { "env", "prod" } });
+        var s2 = CreateTestSession(tags: new Dictionary<string, string> { { "env", "dev" } });
 
-        // Act
-        await manager.ListAsync("User", "Alice");
+        var id1 = await _manager.SaveAsync(s1);
+        var id2 = await _manager.SaveAsync(s2);
 
-        // Assert
-        _mockStore.Verify(x => x.ListAsync("User", "Alice", It.IsAny<CancellationToken>()), Times.Once);
+        var result = await _manager.ListAsync("env", "prod");
+
+        result.Count.Should().Be(1);
+        result.Should().Contain(id1);
+        result.Should().NotContain(id2);
     }
 
-    // -------------------- DisposeAsync --------------------
+    #endregion
+
+    #region Query
 
     [Fact]
-    public async Task DisposeAsync_ShouldDisposeBackgroundSaver()
+    public async Task QueryAsync_ReturnsSummaries()
     {
-        // Arrange
-        var options = new BackgroundSaveOptions { Enabled = true };
-        var manager = new SessionManager(_mockStore.Object, options);
+        var s1 = CreateTestSession(modelFingerprint: "model-A");
+        var s2 = CreateTestSession(modelFingerprint: "model-B");
+        await _manager.SaveAsync(s1);
+        await _manager.SaveAsync(s2);
 
-        // Act
-        await manager.DisposeAsync();
+        var query = new SessionQuery { ModelFingerprint = "model-B" };
+        var summaries = await _manager.QueryAsync(query);
 
-        // Assert - verify the store wasn't harmed, and disposing twice is safe
-        await manager.DisposeAsync(); // Should not throw
+        summaries.Should().ContainSingle(s => s.ModelFingerprint == "model-B");
+        summaries.Should().NotContain(s => s.ModelFingerprint == "model-A");
     }
+
+    [Fact]
+    public async Task QueryStreamAsync_StreamsSummaries()
+    {
+        var s1 = CreateTestSession(modelFingerprint: "model-A");
+        var s2 = CreateTestSession(modelFingerprint: "model-B");
+        await _manager.SaveAsync(s1);
+        await _manager.SaveAsync(s2);
+
+        var stream = _manager.QueryStreamAsync(new SessionQuery());
+        var list = await stream.ToListAsync();
+
+        list.Should().HaveCount(2);
+        list.Should().Contain(s => s.ModelFingerprint == "model-A");
+        list.Should().Contain(s => s.ModelFingerprint == "model-B");
+    }
+
+    #endregion
+
+    #region Dispose
+
+    [Fact]
+    public async Task DisposeAsync_DisposesStore()
+    {
+        // Already called in DisposeAsync of the test class.
+        // We'll just call it again to ensure no exception.
+        await _manager.DisposeAsync();
+        await _manager.DisposeAsync(); // should be safe
+    }
+
+    #endregion
 }

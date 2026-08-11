@@ -1,64 +1,38 @@
 ﻿using StateCheckpoint.NET.Models;
 using StateCheckpoint.NET.Settings;
-using StateCheckpoint.NET.Stores;
 
-namespace StateCheckpoint.NET.Manager;
+namespace StateCheckpoint.NET;
 
 public class CheckpointManager : IAsyncDisposable
 {
     private readonly IModelStore _store;
     private readonly BackgroundSaver<ModelCheckpoint>? _backgroundSaver;
-    private static string _defaultCheckpointPath = "./checkpoints";
+    private readonly RetentionPolicy _retentionPolicy;
 
     /// <summary>
     /// Initializes the manager with a custom storage provider.
     /// </summary>
-    /// <param name="store">Any implementation of IModelStore (FileSystem, PostgreSQL, etc.)</param>
-    public CheckpointManager(IModelStore store)
+    /// <param name="storageOptions"></param>
+    /// <param name="backgroundOptions"></param>
+    public CheckpointManager(StorageOptions storageOptions)
     {
-        _store = store ?? throw new ArgumentNullException(nameof(store));
-    }
+        storageOptions.Validate();
 
-    /// <summary>
-    /// Initializes the manager with the default FileSystem store.
-    /// Models are saved to ./checkpoints by default.
-    /// </summary>
-    public CheckpointManager() : this(new FileSystemModelStore(_defaultCheckpointPath))
-    {
-    }
+        _retentionPolicy = storageOptions.RetentionPolicy ?? new RetentionPolicy();
 
-    /// <summary>
-    /// Initializes the manager with the default FileSystem store at a custom root path.
-    /// </summary>
-    /// <param name="rootPath">Root directory where checkpoints will be stored.</param>
-    public CheckpointManager(string rootPath) : this(new FileSystemModelStore(rootPath))
-    {
-    }
+        _store = StoreModelFactory.Create(storageOptions);
 
-    /// <summary>
-    /// Initializes the manager with the default FileSystem store and enables background saves.
-    /// </summary>
-    /// <param name="options">Background save configuration (Enabled, QueueCapacity, OnError).</param>
-    public CheckpointManager(BackgroundSaveOptions options)
-        : this(new FileSystemModelStore(_defaultCheckpointPath), options)
-    {
-    }
+        // Ensure schema only if the store is a database store
+        if (storageOptions?.DbStoreOptions?.EnsureSchemaOnStartup == true && _store is IDbModelStore dbStore)
+        {
+            dbStore.EnsureSchemaAsync().GetAwaiter().GetResult();
+        }
 
-    /// <summary>
-    /// Initializes the manager with a custom storage provider and enables background saves.
-    /// </summary>
-    /// <param name="store">Any implementation of IModelStore (FileSystem, PostgreSQL, etc.).</param>
-    /// <param name="options">Background save configuration (Enabled, QueueCapacity, OnError).</param>
-    public CheckpointManager(IModelStore store, BackgroundSaveOptions options)
-    {
-        _store = store ?? throw new ArgumentNullException(nameof(store));
-
-        if (options != null && options.Enabled)
+        if (storageOptions?.BackgroundSaveOptions?.Enabled == true)
         {
             _backgroundSaver = new BackgroundSaver<ModelCheckpoint>(
-                capacity: options.QueueCapacity,
-                onError: options.OnError
-            );
+                capacity: storageOptions.BackgroundSaveOptions.QueueCapacity,
+                onError: storageOptions?.BackgroundSaveOptions?.OnError);
         }
     }
 
@@ -76,57 +50,73 @@ public class CheckpointManager : IAsyncDisposable
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>Returns the ModelId (GUID) of the saved checkpoint.</returns>
     public async Task<Guid> SaveAsync(
-        byte[] weights,
-        byte[] optimizer,
-        HyperParameters hyperParams,
-        TokenizerData tokenizer,
-        int epoch,
-        float loss,
-        Guid? existingId = null,
-        Dictionary<string, string>? tags = null,
+        ModelCheckpoint modelCheckpoint,
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        var checkpoint = new ModelCheckpoint
-        {
-            ModelId = existingId ?? Guid.NewGuid(),
-            WeightsBytes = weights,
-            OptimizerBytes = optimizer,
-            HyperParams = hyperParams,
-            Tokenizer = tokenizer,
-            CurrentEpoch = epoch,
-            LastTrainingLoss = loss,
-            CreatedAt = DateTime.UtcNow,
-            Tags = tags ?? new Dictionary<string, string>()
-        };
-
-        // --- BACKGROUND MODE ---
         if (_backgroundSaver != null)
         {
-            // DEEP COPY the byte arrays to prevent mutation during background write
-            var capturedCheckpoint = new ModelCheckpoint
-            {
-                ModelId = checkpoint.ModelId,
-                WeightsBytes = checkpoint.WeightsBytes.ToArray(),
-                OptimizerBytes = checkpoint.OptimizerBytes.ToArray(),
-                HyperParams = checkpoint.HyperParams,
-                Tokenizer = checkpoint.Tokenizer,
-                CurrentEpoch = checkpoint.CurrentEpoch,
-                LastTrainingLoss = checkpoint.LastTrainingLoss,
-                CreatedAt = checkpoint.CreatedAt,
-                Tags = checkpoint.Tags
-            };
+            await _backgroundSaver.EnqueueAsync(async (ct) => await _store.SaveAsync(modelCheckpoint, ct), cancellationToken);
 
-            await _backgroundSaver.EnqueueAsync(async (ct) => await _store.SaveAsync(capturedCheckpoint, ct));
-
-            return checkpoint.ModelId; // Returns immediately!
+            return modelCheckpoint.ModelId;
         }
 
-        // --- SYNCHRONOUS MODE (Default) ---
-        await _store.SaveAsync(checkpoint, cancellationToken);
-        return checkpoint.ModelId;
+        await _store.SaveAsync(modelCheckpoint, cancellationToken);
+
+        if (_retentionPolicy != null)
+            await this.InternalApplyRetentionPolicyAsync(cancellationToken);
+
+        return modelCheckpoint.ModelId;
     }
+
+    /// Finds the checkpoint with the highest score according to a user-supplied selector.
+    /// Queries only summaries (no binary data) and loads the winning checkpoint.
+    /// </summary>
+    /// <param name="scoreSelector">Function that maps a CheckpointSummary to a numeric score (higher = better).</param>
+    /// <param name="filter">Optional query filter to narrow the search.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>The full ModelCheckpoint with the highest score, or null if none exist.</returns>
+    public async Task<ModelCheckpoint?> FindBestAsync(
+        Func<CheckpointSummary, float> scoreSelector,
+        CheckpointQuery? filter = null,
+        CancellationToken cancellationToken = default)
+    {
+        filter ??= new CheckpointQuery();
+        var summaries = await _store.QueryAsync(filter, cancellationToken);
+
+        if (summaries.Count == 0) return null;
+
+        var bestSummary = summaries.MaxBy(scoreSelector);
+
+        if (bestSummary == null) return null;
+
+        return await _store.LoadAsync(bestSummary.ModelId, cancellationToken);
+    }
+
+    /// <summary>
+    /// Finds the checkpoint with the lowest training loss (optionally filtered).
+    /// </summary>
+    public Task<ModelCheckpoint?> FindBestByLossAsync(CheckpointQuery? filter = null, CancellationToken cancellationToken = default)
+        => FindBestAsync(s => -s.LastTrainingLoss, filter, cancellationToken);
+
+    /// <summary>
+    /// Finds the checkpoint with the most recent epoch (optionally filtered).
+    /// </summary>
+    public Task<ModelCheckpoint?> FindLatestEpochAsync(CheckpointQuery? filter = null, CancellationToken cancellationToken = default)
+        => FindBestAsync(s => s.CurrentEpoch, filter, cancellationToken);
+
+    public Task<List<CheckpointSummary>> QueryAsync(CheckpointQuery query, CancellationToken cancellationToken = default)
+        => _store.QueryAsync(query, cancellationToken);
+
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="query"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    public IAsyncEnumerable<CheckpointSummary> QueryStreamAsync(CheckpointQuery query, CancellationToken cancellationToken = default)
+        => _store.QueryStreamAsync(query, cancellationToken);
 
     /// <summary>
     /// Load a checkpoint.
@@ -156,14 +146,45 @@ public class CheckpointManager : IAsyncDisposable
         => await _store.ListAsync(tagKey, tagValue, cancellationToken);
 
     /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    public async Task<int> ApplyRetentionPolicyAsync(CancellationToken cancellationToken = default) 
+        => await this.InternalApplyRetentionPolicyAsync(cancellationToken);
+
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <param name="baseLineId"></param>
+    /// <param name="CandidateId"></param>
+    /// <param name="cancellationToken"></param>
+    /// <returns></returns>
+    public async Task<CheckpointDiff> CompareAsync(Guid baseLineId, Guid CandidateId, CancellationToken cancellationToken = default) 
+        => await this.InternalCompareAsync(baseLineId, CandidateId, cancellationToken);
+
+    /// <summary>
     /// Disposes the manager and ensures the background saver finishes all pending operations.
     /// Must be called if background saves are enabled.
     /// </summary>
     public async ValueTask DisposeAsync()
     {
         if (_backgroundSaver != null)
-        {
             await _backgroundSaver.DisposeAsync();
-        }
+        
+        if (_store is IAsyncDisposable asyncDisposable)
+            await asyncDisposable.DisposeAsync();
+    }
+
+    //----------- Internal -------------//
+
+    internal RetentionPolicy RetentionPolicy
+    {
+        get { return _retentionPolicy; }
+    }
+
+    internal IModelStore Store
+    {
+        get { return _store; }
     }
 }
