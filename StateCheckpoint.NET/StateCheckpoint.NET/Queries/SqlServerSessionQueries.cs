@@ -10,50 +10,50 @@ internal static class SqlServerSessionQueries
     public const string EnsureSessionSchema = @"
         IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='InferenceSessions' AND xtype='U')
         BEGIN
-            CREATE TABLE InferenceSessions (
-                SessionId UNIQUEIDENTIFIER PRIMARY KEY,
-                ModelFingerprint NVARCHAR(255) NOT NULL,
-                TokenHistory NVARCHAR(MAX) NOT NULL,   -- JSON array
-                SamplingConfig NVARCHAR(MAX) NOT NULL, -- JSON
-                KvCacheData VARBINARY(MAX) NOT NULL,
-                LastUpdated DATETIME2 NOT NULL,
-                Tags NVARCHAR(MAX) NOT NULL            -- JSON
+            CREATE TABLE inference_sessions (
+                session_id UNIQUEIDENTIFIER PRIMARY KEY,
+                model_fingerprint NVARCHAR(255) NOT NULL,
+                token_history NVARCHAR(MAX) NOT NULL,   -- JSON array
+                sampling_config NVARCHAR(MAX) NOT NULL, -- JSON
+                kv_cache_data VARBINARY(MAX) NOT NULL,
+                last_updated DATETIME2 NOT NULL,
+                tags NVARCHAR(MAX) NOT NULL            -- JSON
             );
         END";
 
     // --- CRUD ---
     public const string UpsertInferenceSession = @"
-        MERGE INTO InferenceSessions AS target
-        USING (SELECT @Id AS SessionId) AS source
-        ON target.SessionId = source.SessionId
+        MERGE INTO inteference_sessions AS target
+        USING (SELECT @Id AS session_id) AS source
+        ON target.session_id = source.session_id
         WHEN MATCHED THEN
             UPDATE SET
-                ModelFingerprint = @ModelFingerprint,
-                TokenHistory = @TokenHistory,
-                SamplingConfig = @SamplingConfig,
-                KvCacheData = @KvCacheData,
-                LastUpdated = @LastUpdated,
-                Tags = @Tags
+                model_fingerprint = @ModelFingerprint,
+                token_history = @TokenHistory,
+                sampling_config = @SamplingConfig,
+                kv_cache_data = @KvCacheData,
+                last_updated = @LastUpdated,
+                tags = @Tags
         WHEN NOT MATCHED THEN
-            INSERT (SessionId, ModelFingerprint, TokenHistory, SamplingConfig, KvCacheData, LastUpdated, Tags)
+            INSERT (session_id, model_fingerprint, token_history, sampling_config, kv_cache_data, last_updated, tags)
             VALUES (@Id, @ModelFingerprint, @TokenHistory, @SamplingConfig, @KvCacheData, @LastUpdated, @Tags);";
 
     public const string SelectInferenceSession = @"
         SELECT
-            ModelFingerprint,
-            TokenHistory,
-            SamplingConfig,
-            KvCacheData,
-            LastUpdated,
-            Tags
-        FROM InferenceSessions
-        WHERE SessionId = @Id;";
+            model_fingerprint,
+            token_history,
+            sampling_config,
+            kv_cache_data,
+            last_updated,
+            tags
+        FROM inference_sessions
+        WHERE session_id = @Id;";
 
     public const string DeleteInferenceSession =
-        "DELETE FROM InferenceSessions WHERE SessionId = @Id;";
+        "DELETE FROM inference_sessions WHERE session_id = @Id;";
 
     // --- Listing ---
-    public const string ListAllSessionIds = "SELECT SessionId FROM InferenceSessions;";
+    public const string ListAllSessionIds = "SELECT session_id FROM inference_sessions;";
     //public const string ListSessionIdsByTag = "SELECT SessionId FROM InferenceSessions WHERE Tags LIKE @TagPattern;";
-    public const string ListSessionIdsByTag = "SELECT SessionId FROM InferenceSessions WHERE JSON_VALUE(Tags, '$.{tagKey}') = @TagValue";
+    public const string ListSessionIdsByTag = "SELECT session_id FROM inference_sessions WHERE JSON_VALUE(Tags, '$.{tagKey}') = @TagValue";
 }

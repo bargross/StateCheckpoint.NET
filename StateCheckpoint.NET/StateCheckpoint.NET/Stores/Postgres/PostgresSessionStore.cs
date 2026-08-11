@@ -89,11 +89,20 @@ internal class PostgresSessionStore : PostgresStoreBase, IDbSessionStore
     public async Task DeleteAsync(Guid sessionId, CancellationToken cancellationToken = default)
     {
         await using var connection = await GetConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
-        await using var command = new NpgsqlCommand(PostgresSessionQueries.DeleteInferenceSession, connection);
-        command.Parameters.AddWithValue("@id", sessionId);
+        try
+        {
+            await DeleteInternalAsync(connection, transaction, sessionId, cancellationToken);
 
-        await command.ExecuteNonQueryAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch
+        {
+            await transaction.RollbackAsync(cancellationToken);
+
+            throw;
+        }
     }
 
     public async Task DeleteManyAsync(IEnumerable<Guid> sessionIds, CancellationToken cancellationToken = default)
@@ -101,10 +110,19 @@ internal class PostgresSessionStore : PostgresStoreBase, IDbSessionStore
         await using var connection = await GetConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
-        foreach (var id in sessionIds)
-            await DeleteAsync(id, cancellationToken);
+        try
+        {
+            foreach (var id in sessionIds)
+                await DeleteInternalAsync(connection, transaction, id, cancellationToken);
 
-        await transaction.CommitAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch
+        {
+            await transaction.RollbackAsync(cancellationToken);
+
+            throw;
+        }
     }
 
     /// <summary>
@@ -129,7 +147,7 @@ internal class PostgresSessionStore : PostgresStoreBase, IDbSessionStore
         {
             // Build the JSON object in C# and pass it as a JSONB parameter
             var jsonObject = $"{{ \"{tagKey}\": \"{tagValue}\" }}";
-            sqlQuery = "SELECT session_id FROM inference_sessions WHERE tags @> @tag::jsonb";
+            sqlQuery = "SELECT sessionId FROM inferenceSessions WHERE tags @> @tag::jsonb";
 
             command = new NpgsqlCommand(sqlQuery, connection);
             command.Parameters.AddWithValue("@tag", jsonObject);
@@ -218,6 +236,25 @@ internal class PostgresSessionStore : PostgresStoreBase, IDbSessionStore
     }
 
     //---------------- Private Methods ---------------//
+
+    private async Task DeleteInternalAsync(
+       NpgsqlConnection connection,
+       NpgsqlTransaction transaction,
+       Guid modelId,
+       CancellationToken cancellationToken)
+    {
+        // Delete from ModelBlobs (cascades or manual)
+        await using var deleteBlobs = new NpgsqlCommand("DELETE FROM ModelBlobs WHERE sessionId = @id", connection, transaction);
+        deleteBlobs.Parameters.AddWithValue("@id", modelId);
+
+        await deleteBlobs.ExecuteNonQueryAsync(cancellationToken);
+
+        // Delete from ModelManifests
+        await using var deleteManifest = new NpgsqlCommand("DELETE FROM ModelManifests WHERE sessionId = @id", connection, transaction);
+        deleteManifest.Parameters.AddWithValue("@id", modelId);
+
+        await deleteManifest.ExecuteNonQueryAsync(cancellationToken);
+    }
 
     private (string Sql, List<NpgsqlParameter> Parameters) BuildQuerySql(SessionQuery query, bool includeOrderBy = true, bool includeLimit = true)
     {

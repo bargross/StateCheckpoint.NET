@@ -1,4 +1,5 @@
 ﻿using Microsoft.Data.SqlClient;
+using Npgsql;
 using StateCheckpoint.NET.Models;
 using System.Runtime.CompilerServices;
 using System.Text;
@@ -11,7 +12,6 @@ internal class SqlServerSessionStore : SqlServerStoreBase, IDbSessionStore
     private static readonly JsonSerializerOptions _jsonOpts = new() { WriteIndented = false };
 
     public SqlServerSessionStore(string connectionString) : base(connectionString) { }
-    public SqlServerSessionStore(SqlConnection connection) : base(connection) { }
 
     /// <summary>
     /// Ensures schema is created
@@ -20,7 +20,7 @@ internal class SqlServerSessionStore : SqlServerStoreBase, IDbSessionStore
     /// <returns></returns>
     public async Task EnsureSchemaAsync(CancellationToken cancellationToken = default)
     {
-        using var connection = await GetConnectionAsync(cancellationToken);
+        await using var connection = await GetConnectionAsync(cancellationToken);
 
         await using var command = new SqlCommand(SqlServerSessionQueries.EnsureSessionSchema, connection);
 
@@ -35,7 +35,7 @@ internal class SqlServerSessionStore : SqlServerStoreBase, IDbSessionStore
     /// <returns>Session id created for the given session</returns>
     public async Task SaveAsync(SessionCheckpoint session, CancellationToken cancellationToken = default)
     {
-        using var connection = await GetConnectionAsync(cancellationToken);
+        await using var connection = await GetConnectionAsync(cancellationToken);
 
         await using var tx = await connection.BeginTransactionAsync(cancellationToken);
 
@@ -64,7 +64,7 @@ internal class SqlServerSessionStore : SqlServerStoreBase, IDbSessionStore
     /// <returns></returns>
     public async Task<SessionCheckpoint?> LoadAsync(Guid sessionId, CancellationToken cancellationToken = default)
     {
-        using var connection = await GetConnectionAsync(cancellationToken);
+        await using var connection = await GetConnectionAsync(cancellationToken);
 
         await using var command = new SqlCommand(SqlServerSessionQueries.SelectInferenceSession, connection);
 
@@ -94,24 +94,41 @@ internal class SqlServerSessionStore : SqlServerStoreBase, IDbSessionStore
     /// <returns></returns>
     public async Task DeleteAsync(Guid sessionId, CancellationToken cancellationToken = default)
     {
-        using var connection = await GetConnectionAsync(cancellationToken);
+        await using var connection = await GetConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
-        await using var command = new SqlCommand(SqlServerSessionQueries.DeleteInferenceSession, connection);
+        try
+        {
+            await DeleteInternalAsync(connection, transaction as SqlTransaction, sessionId, cancellationToken);
 
-        command.Parameters.AddWithValue("@Id", sessionId);
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch
+        {
+            await transaction.RollbackAsync(cancellationToken);
 
-        await command.ExecuteNonQueryAsync(cancellationToken);
+            throw;
+        }
     }
 
-    public async Task DeleteManyAsync(IEnumerable<Guid> sesionIds, CancellationToken cancellationToken = default)
+    public async Task DeleteManyAsync(IEnumerable<Guid> sessionIds, CancellationToken cancellationToken = default)
     {
         await using var connection = await GetConnectionAsync(cancellationToken);
-        await using var tx = await connection.BeginTransactionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
-        foreach (var id in sesionIds)
-            await DeleteAsync(id, cancellationToken);
+        try
+        {
+            foreach (var id in sessionIds)
+                await DeleteInternalAsync(connection, transaction as SqlTransaction, id, cancellationToken);
+            
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch
+        {
+            await transaction.RollbackAsync(cancellationToken);
 
-        await tx.CommitAsync(cancellationToken);
+            throw;
+        }
     }
 
     /// <summary>
@@ -123,7 +140,7 @@ internal class SqlServerSessionStore : SqlServerStoreBase, IDbSessionStore
     /// <returns></returns>
     public async Task<List<Guid>> ListAsync(string? tagKey = null, string? tagValue = null, CancellationToken cancellationToken = default)
     {
-        using var connection = await GetConnectionAsync(cancellationToken);
+        await using var connection = await GetConnectionAsync(cancellationToken);
 
         string sql;
         SqlCommand command;
@@ -228,17 +245,33 @@ internal class SqlServerSessionStore : SqlServerStoreBase, IDbSessionStore
 
     //------------ Private Methods --------------//
 
+    private async Task DeleteInternalAsync(
+        SqlConnection connection,
+        SqlTransaction transaction,
+        Guid sessionId,
+        CancellationToken cancellationToken)
+    {
+        await using var command = new SqlCommand(
+            "DELETE FROM inference_sessions WHERE session_id = @id",
+            connection,
+            transaction);
+
+        command.Parameters.AddWithValue("@id", sessionId);
+
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     private (string Sql, List<SqlParameter> Parameters) BuildQuerySql(SessionQuery query, bool includeOrderBy = true, bool includeLimit = true)
     {
         var sql = new StringBuilder(@"
-        SELECT session_id, model_fingerprint, last_updated, tags
-        FROM InferenceSessions
-        WHERE 1=1
-    ");
+            SELECT session_id, model_fingerprint, last_updated, tags
+            FROM InferenceSessions
+            WHERE 1=1
+        ");
 
         var parameters = new List<SqlParameter>();
 
-        if (!string.IsNullOrEmpty(query.ModelFingerprint))
+        if (!string.IsNullOrWhiteSpace(query.ModelFingerprint))
         {
             sql.Append(" AND model_fingerprint = @ModelFingerprint");
             parameters.Add(new SqlParameter("@ModelFingerprint", query.ModelFingerprint));

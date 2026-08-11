@@ -1,4 +1,5 @@
 ﻿using Microsoft.Data.SqlClient;
+using Npgsql;
 using StateCheckpoint.NET.Models;
 using System.Runtime.CompilerServices;
 using System.Text;
@@ -11,7 +12,6 @@ internal class SqlServerModelStore : SqlServerStoreBase, IDbModelStore
     private static readonly JsonSerializerOptions _jsonOpts = new() { WriteIndented = false };
 
     public SqlServerModelStore(string connectionString) : base(connectionString) { }
-    public SqlServerModelStore(SqlConnection connection) : base(connection) { }
 
     /// <summary>
     /// Ensures the schema for the model is created
@@ -20,7 +20,7 @@ internal class SqlServerModelStore : SqlServerStoreBase, IDbModelStore
     /// <returns></returns>
     public async Task EnsureSchemaAsync(CancellationToken cancellationToken = default)
     {
-        using var connection = await GetConnectionAsync(cancellationToken);
+        await using var connection = await GetConnectionAsync(cancellationToken);
 
         await using var command = new SqlCommand(SqlServerTrainingQueries.EnsureModelSchema, connection);
 
@@ -35,7 +35,7 @@ internal class SqlServerModelStore : SqlServerStoreBase, IDbModelStore
     /// <returns>id for model checkpoint</returns>
     public async Task SaveAsync(ModelCheckpoint checkpoint, CancellationToken cancellationToken = default)
     {
-        using var connection = await GetConnectionAsync(cancellationToken);
+        await using var connection = await GetConnectionAsync(cancellationToken);
         await using var tx = await connection.BeginTransactionAsync(cancellationToken);
 
         await using var command = new SqlCommand(SqlServerTrainingQueries.UpsertModelManifest, connection, tx as SqlTransaction);
@@ -69,7 +69,7 @@ internal class SqlServerModelStore : SqlServerStoreBase, IDbModelStore
     /// <returns></returns>
     public async Task<ModelCheckpoint?> LoadAsync(Guid modelId, CancellationToken cancellationToken = default)
     {
-        using var connection = await GetConnectionAsync(cancellationToken);
+        await using var connection = await GetConnectionAsync(cancellationToken);
 
         await using var command = new SqlCommand(SqlServerTrainingQueries.SelectFullModelManifest, connection);
 
@@ -110,13 +110,40 @@ internal class SqlServerModelStore : SqlServerStoreBase, IDbModelStore
     /// <returns></returns>
     public async Task DeleteAsync(Guid modelId, CancellationToken cancellationToken = default)
     {
-        using var connection = await GetConnectionAsync(cancellationToken);
+        await using var connection = await GetConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        try
+        {
+            await DeleteInternalAsync(connection, transaction as SqlTransaction, modelId, cancellationToken);
 
-        await using var command = new SqlCommand(SqlServerTrainingQueries.DeleteModelManifest, connection);
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch
+        {
+            await transaction.RollbackAsync(cancellationToken);
 
-        command.Parameters.AddWithValue("@Id", modelId);
+            throw;
+        }
+    }
 
-        await command.ExecuteNonQueryAsync(cancellationToken);
+    public async Task DeleteManyAsync(IEnumerable<Guid> modelIds, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await GetConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        try
+        {
+            foreach (var id in modelIds)
+            {
+                await DeleteInternalAsync(connection, transaction as SqlTransaction, id, cancellationToken);
+            }
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            throw;
+        }
     }
 
     /// <summary>
@@ -128,7 +155,7 @@ internal class SqlServerModelStore : SqlServerStoreBase, IDbModelStore
     /// <returns></returns>
     public async Task<List<Guid>> ListAsync(string? tagKey = null, string? tagValue = null, CancellationToken cancellationToken = default)
     {
-        using var connection = await GetConnectionAsync(cancellationToken);
+        await using var connection = await GetConnectionAsync(cancellationToken);
 
         string sql;
         SqlCommand command;
@@ -214,17 +241,6 @@ internal class SqlServerModelStore : SqlServerStoreBase, IDbModelStore
         }
     }
 
-    public async Task DeleteManyAsync(IEnumerable<Guid> modelIds, CancellationToken cancellationToken = default)
-    {
-        await using var connection = await GetConnectionAsync(cancellationToken);
-        await using var tx = await connection.BeginTransactionAsync(cancellationToken);
-
-        foreach (var id in modelIds)
-            await DeleteAsync(id, cancellationToken);
-
-        await tx.CommitAsync(cancellationToken);
-    }
-
     public async Task<CheckpointSummary?> GetCheckpointSummaryAsync(Guid modelId, CancellationToken cancellationToken = default)
     {
         await using var connection = await GetConnectionAsync(cancellationToken);
@@ -250,6 +266,22 @@ internal class SqlServerModelStore : SqlServerStoreBase, IDbModelStore
     }
 
     //------------- Private Methods -----------------//
+
+    private async Task DeleteInternalAsync(
+        SqlConnection connection,
+        SqlTransaction transaction,
+        Guid sessionId,
+        CancellationToken cancellationToken)
+    {
+        await using var command = new SqlCommand(
+            "DELETE FROM inference_sessions WHERE session_id = @id",
+            connection,
+            transaction);
+
+        command.Parameters.AddWithValue("@id", sessionId);
+
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
 
     private (string Sql, List<SqlParameter> Parameters) BuildQuerySql(CheckpointQuery query, bool includeOrderBy = true, bool includeLimit = true)
     {

@@ -1,8 +1,7 @@
-﻿using System;
-using System.Collections.Generic;
-using FluentAssertions;
+﻿using FluentAssertions;
 using StateCheckpoint.NET.Models;
 using StateCheckpoint.NET.Settings;
+using System.Text;
 
 namespace StateCheckpoint.NET;
 
@@ -21,6 +20,25 @@ public class StorageOptionsValidationTests
         Action act = () => options.Validate();
         act.Should().Throw<InvalidOperationException>()
             .WithMessage("FileSystemStoreOptions is required when StoreType is Local.");
+    }
+
+    public string ToString(bool[,] container)
+    {
+        if (container == null) return string.Empty;
+
+        var n = container.GetLength(0);
+        var sb = new StringBuilder(n * n);
+        for (var rw = 0; rw < n; rw++)
+        {
+            for (var col = 0; col < n; col++)
+            {
+                sb.Append(container[rw, col].ToString());
+            }
+
+            if (rw < n - 1) sb.Append(Environment.NewLine);
+        }
+
+        return sb.ToString();
     }
 
     [Fact]

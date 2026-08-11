@@ -11,23 +11,23 @@ internal static class SqlServerTrainingQueries
         IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='ModelManifests' AND xtype='U')
         BEGIN
             CREATE TABLE ModelManifests (
-                ModelId UNIQUEIDENTIFIER PRIMARY KEY,
-                HyperParams NVARCHAR(MAX) NOT NULL,  -- JSON
-                Tokenizer NVARCHAR(MAX) NOT NULL,    -- JSON
-                Epoch INT NOT NULL,
-                Loss FLOAT NOT NULL,
-                CreatedAt DATETIME2 NOT NULL,
-                Tags NVARCHAR(MAX) NOT NULL          -- JSON
+                model_id UNIQUEIDENTIFIER PRIMARY KEY,
+                hyper_params NVARCHAR(MAX) NOT NULL,  -- JSON
+                tokenizer NVARCHAR(MAX) NOT NULL,    -- JSON
+                epoch INT NOT NULL,
+                loss FLOAT NOT NULL,
+                created_at DATETIME2 NOT NULL,
+                tags NVARCHAR(MAX) NOT NULL          -- JSON
             );
         END
 
         IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='ModelBlobs' AND xtype='U')
         BEGIN
             CREATE TABLE ModelBlobs (
-                ModelId UNIQUEIDENTIFIER PRIMARY KEY,
-                WeightsData VARBINARY(MAX) NOT NULL,
-                OptimizerData VARBINARY(MAX) NOT NULL,
-                CONSTRAINT FK_ModelBlobs_ModelManifests FOREIGN KEY (ModelId)
+                model_id UNIQUEIDENTIFIER PRIMARY KEY,
+                weights_data VARBINARY(MAX) NOT NULL,
+                optimizer_data VARBINARY(MAX) NOT NULL,
+                CONSTRAINT FK_ModelBlobs_ModelManifests FOREIGN KEY (model_id)
                     REFERENCES ModelManifests(ModelId) ON DELETE CASCADE
             );
         END";
@@ -39,50 +39,50 @@ internal static class SqlServerTrainingQueries
         ON target.ModelId = source.ModelId
         WHEN MATCHED THEN
             UPDATE SET
-                HyperParams = @HyperParams,
-                Tokenizer = @Tokenizer,
-                Epoch = @Epoch,
-                Loss = @Loss,
-                Tags = @Tags
+                hyper_params = @HyperParams,
+                tokenizer = @Tokenizer,
+                epoch = @Epoch,
+                loss = @Loss,
+                tags = @Tags
         WHEN NOT MATCHED THEN
-            INSERT (ModelId, HyperParams, Tokenizer, Epoch, Loss, CreatedAt, Tags)
+            INSERT (model_id, hyper_params, tokenizer, epoch, loss, created_at, tags)
             VALUES (@Id, @HyperParams, @Tokenizer, @Epoch, @Loss, @CreatedAt, @Tags);";
 
     public const string DeleteModelManifest =
-        "DELETE FROM ModelManifests WHERE ModelId = @Id;";
+        "DELETE FROM ModelManifests WHERE model_id = @Id;";
 
     // --- Blob Operations ---
     public const string SelectModelBlobs =
-        "SELECT WeightsData, OptimizerData FROM ModelBlobs WHERE ModelId = @Id;";
+        "SELECT weights_data, OptimizerData FROM ModelBlobs WHERE model_id = @Id;";
 
     public const string UpsertModelBlobs = @"
         MERGE INTO ModelBlobs AS target
-        USING (SELECT @Id AS ModelId) AS source
-        ON target.ModelId = source.ModelId
+        USING (SELECT @Id AS model_id) AS source
+        ON target.model_id = source.model_id
         WHEN MATCHED THEN
             UPDATE SET
-                WeightsData = @WeightsData,
-                OptimizerData = @OptimizerData
+                weights_data = @WeightsData,
+                optimizer_data = @OptimizerData
         WHEN NOT MATCHED THEN
-            INSERT (ModelId, WeightsData, OptimizerData)
+            INSERT (model_id, weights_data, optimizer_data)
             VALUES (@Id, @WeightsData, @OptimizerData);";
 
     // --- Full Load (Join) ---
     public const string SelectFullModelManifest = @"
         SELECT
-            m.HyperParams,
-            m.Tokenizer,
-            m.Epoch,
-            m.Loss,
-            m.CreatedAt,
-            m.Tags,
-            b.WeightsData,
-            b.OptimizerData
+            m.hyper_params,
+            m.tokenizer,
+            m.epoch,
+            m.loss,
+            m.created_at,
+            m.tags,
+            b.weights_data,
+            b.optimizer_data
         FROM ModelManifests m
-        INNER JOIN ModelBlobs b ON m.ModelId = b.ModelId
+        INNER JOIN ModelBlobs b ON m.model_id = b.model_id
         WHERE m.ModelId = @Id;";
 
     // --- Listing ---
-    public const string ListAllModelIds = "SELECT ModelId FROM ModelManifests;";
-    public const string ListModelIdsByTag = "SELECT ModelId FROM ModelManifests WHERE JSON_VALUE(Tags, '$.{tagKey}') = @TagValue";
+    public const string ListAllModelIds = "SELECT model_id FROM ModelManifests;";
+    public const string ListModelIdsByTag = "SELECT model_id FROM ModelManifests WHERE JSON_VALUE(Tags, '$.{tagKey}') = @TagValue";
 }

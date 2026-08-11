@@ -183,38 +183,35 @@ internal class PostgresModelStore : PostgresStoreBase, IDbModelStore
     public async Task DeleteAsync(Guid modelId, CancellationToken cancellationToken = default)
     {
         await using var connection = await GetConnectionAsync(cancellationToken);
-
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
         try
         {
-            await using var selectCommand = new NpgsqlCommand(PostgresTrainingQueries.SelectModelBlobOids, connection, transaction);
-
-            selectCommand.Parameters.AddWithValue("@id", modelId);
-
-            await using var dataReader = await selectCommand.ExecuteReaderAsync(cancellationToken);
-
-            if (await dataReader.ReadAsync(cancellationToken))
-            {
-                uint weightOid = dataReader.GetFieldValue<uint>(0);
-                uint optimizerOid = dataReader.GetFieldValue<uint>(1);
-                await dataReader.CloseAsync();
-
-                await UnlinkLargeObjectAsync(connection, transaction, weightOid, cancellationToken);
-                await UnlinkLargeObjectAsync(connection, transaction, optimizerOid, cancellationToken);
-            }
-            else await dataReader.CloseAsync();
-
-            await using var deleteCommand = new NpgsqlCommand(PostgresTrainingQueries.DeleteModelManifest, connection, transaction);
-            deleteCommand.Parameters.AddWithValue("@id", modelId);
-            await deleteCommand.ExecuteNonQueryAsync(cancellationToken);
-
+            await DeleteInternalAsync(connection, transaction, modelId, cancellationToken);
             await transaction.CommitAsync(cancellationToken);
         }
         catch
         {
             await transaction.RollbackAsync(cancellationToken);
+            throw;
+        }
+    }
 
+    public async Task DeleteManyAsync(IEnumerable<Guid> modelIds, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await GetConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        try
+        {
+            foreach (var id in modelIds)
+            {
+                await DeleteInternalAsync(connection, transaction, id, cancellationToken);
+            }
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch
+        {
+            await transaction.RollbackAsync(cancellationToken);
             throw;
         }
     }
@@ -308,22 +305,11 @@ internal class PostgresModelStore : PostgresStoreBase, IDbModelStore
         }
     }
 
-    public async Task DeleteManyAsync(IEnumerable<Guid> modelIds, CancellationToken cancellationToken = default)
-    {
-        await using var connection = await GetConnectionAsync(cancellationToken);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
-
-        foreach (var id in modelIds)
-            await DeleteAsync(id, cancellationToken);
-
-        await transaction.CommitAsync(cancellationToken);
-    }
-
     public async Task<CheckpointSummary?> GetCheckpointSummaryAsync(Guid modelId, CancellationToken cancellationToken = default)
     {
         await using var connection = await GetConnectionAsync(cancellationToken);
         const string sql = @"
-        SELECT m.epoch, m.loss, m.created_at, m.tags
+        SELECT m.epoch, m.loss, m.created_at, m.tags, m.hyper_params
         FROM model_manifests m
         JOIN model_blobs b ON m.model_id = b.model_id
         WHERE m.model_id = @id";
@@ -457,6 +443,34 @@ internal class PostgresModelStore : PostgresStoreBase, IDbModelStore
         }
 
         return memoryStream.ToArray();
+    }
+
+    private async Task DeleteInternalAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        Guid modelId,
+        CancellationToken cancellationToken)
+    {
+        // 1. Get OIDs
+        await using var selectCommand = new NpgsqlCommand(PostgresTrainingQueries.SelectModelBlobOids, connection, transaction);
+        selectCommand.Parameters.AddWithValue("@id", modelId);
+
+        await using var dataReader = await selectCommand.ExecuteReaderAsync(cancellationToken);
+        if (await dataReader.ReadAsync(cancellationToken))
+        {
+            uint weightOid = dataReader.GetFieldValue<uint>(0);
+            uint optimizerOid = dataReader.GetFieldValue<uint>(1);
+            await dataReader.CloseAsync();
+
+            await UnlinkLargeObjectAsync(connection, transaction, weightOid, cancellationToken);
+            await UnlinkLargeObjectAsync(connection, transaction, optimizerOid, cancellationToken);
+        }
+        else await dataReader.CloseAsync();
+       
+        await using var deleteCommand = new NpgsqlCommand(PostgresTrainingQueries.DeleteModelManifest, connection, transaction);
+        deleteCommand.Parameters.AddWithValue("@id", modelId);
+
+        await deleteCommand.ExecuteNonQueryAsync(cancellationToken);
     }
 
     // Helper to build SQL and parameters for queries

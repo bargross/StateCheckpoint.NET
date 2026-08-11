@@ -30,7 +30,6 @@ public class SqlServerStoreBaseTests
     private class TestableSqlServerStore : SqlServerStoreBase
     {
         public TestableSqlServerStore(string connectionString) : base(connectionString) { }
-        public TestableSqlServerStore(SqlConnection connection) : base(connection) { }
 
         public new async Task<SqlConnection> GetConnectionAsync(CancellationToken cancellationToken = default)
             => await base.GetConnectionAsync(cancellationToken);
@@ -77,28 +76,6 @@ public class SqlServerStoreBaseTests
     }
 
     [SkippableFact]
-    public async Task Constructor_WithExistingConnection_UsesProvidedConnection()
-    {
-        Skip.IfNot(IsLocalDbAvailable(), "LocalDB is not available. Skipping test.");
-
-        // Arrange
-        using var existingConn = new SqlConnection(TestConnectionString);
-        await existingConn.OpenAsync();
-
-        // Act
-        var store = new TestableSqlServerStore(existingConn);
-        var retrievedConn = await store.GetConnectionAsync();
-
-        // Assert
-        retrievedConn.Should().BeSameAs(existingConn);
-
-        // Clean up
-        await store.DisposeAsync(); // Should NOT dispose existingConn
-        existingConn.State.Should().Be(ConnectionState.Open);
-        await existingConn.DisposeAsync();
-    }
-
-    [SkippableFact]
     public async Task DisposeAsync_WhenOwnsConnection_DoesNotCloseConnections()
     {
         Skip.IfNot(IsLocalDbAvailable(), "LocalDB is not available. Skipping test.");
@@ -115,28 +92,6 @@ public class SqlServerStoreBaseTests
 
         await connection.DisposeAsync();
         connection.State.Should().Be(ConnectionState.Closed);
-    }
-
-    [SkippableFact]
-    public async Task DisposeAsync_WhenNotOwnsConnection_DoesNotCloseConnection()
-    {
-        Skip.IfNot(IsLocalDbAvailable(), "LocalDB is not available. Skipping test.");
-
-        // Arrange
-        using var existingConn = new SqlConnection(TestConnectionString);
-        await existingConn.OpenAsync();
-
-        var store = new TestableSqlServerStore(existingConn);
-
-        // Act
-        await store.DisposeAsync();
-
-        // Assert
-        // The store does not own the connection, so it should remain open.
-        existingConn.State.Should().Be(ConnectionState.Open);
-
-        // Clean up manually
-        await existingConn.DisposeAsync();
     }
 
     [SkippableFact]

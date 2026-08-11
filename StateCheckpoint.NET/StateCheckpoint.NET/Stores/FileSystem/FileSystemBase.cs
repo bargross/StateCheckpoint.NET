@@ -1,5 +1,4 @@
-﻿using StateCheckpoint.NET.Models;
-using StateCheckpoint.NET.Settings;
+﻿using StateCheckpoint.NET.Settings;
 
 namespace StateCheckpoint.NET;
 
