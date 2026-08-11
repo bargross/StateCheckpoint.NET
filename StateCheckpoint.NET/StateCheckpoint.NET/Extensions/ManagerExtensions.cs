@@ -38,17 +38,20 @@ internal static class ManagerExtensions
             foreach (var s in candidates.Where(s => !keep.Contains(s.ModelId)))
                 toDelete.Add(s.ModelId);
         }
+
         if (service.RetentionPolicy.MaxAge.HasValue)
         {
             var cutoff = DateTime.UtcNow - service.RetentionPolicy.MaxAge.Value;
             foreach (var s in candidates.Where(s => s.CreatedAt < cutoff))
                 toDelete.Add(s.ModelId);
         }
+
         if (service.RetentionPolicy.MaxLossThreshold.HasValue)
         {
             foreach (var s in candidates.Where(s => s.LastTrainingLoss > service.RetentionPolicy.MaxLossThreshold.Value))
                 toDelete.Add(s.ModelId);
         }
+
         if (service.RetentionPolicy.MaxEpochAge.HasValue && service.RetentionPolicy.MaxEpochAge.Value > 0)
         {
             var latestEpoch = summaries.Max(s => s.CurrentEpoch);
